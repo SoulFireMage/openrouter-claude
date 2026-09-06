@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
 <meta name="theme-color" content="#0F1417">
 <title>OpenRouter Chat</title>
 <link rel="manifest" href="manifest.json">
@@ -19,6 +19,7 @@
     --accent-text: #05262F;
     --error: #E2725B;
     --radius: 10px;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
   }
 
   * { box-sizing: border-box; }
@@ -45,8 +46,7 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: env(safe-area-inset-top, 0) 14px 10px;
-    padding-top: max(12px, env(safe-area-inset-top));
+    padding: max(12px, env(safe-area-inset-top)) 14px 10px;
     border-bottom: 1px solid var(--border);
     flex-shrink: 0;
   }
@@ -62,6 +62,10 @@
     font-size: 12px;
     color: var(--text-muted);
     margin-top: 2px;
+    max-width: 70vw;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .icon-btn {
@@ -84,6 +88,7 @@
     overflow-y: auto;
     padding: 16px 14px 8px;
     -webkit-overflow-scrolling: touch;
+    overscroll-behavior: contain;
   }
 
   .msg {
@@ -92,7 +97,7 @@
     padding: 10px 13px;
     border-radius: var(--radius);
     white-space: pre-wrap;
-    word-wrap: break-word;
+    overflow-wrap: anywhere;
     font-size: 15px;
   }
 
@@ -110,14 +115,13 @@
     border-bottom-left-radius: 3px;
   }
 
-  .msg.system-note {
-    background: none;
-    color: var(--text-muted);
-    font-size: 13px;
-    text-align: center;
-    max-width: 100%;
-    margin: 8px auto;
+  .msg.assistant.streaming::after {
+    content: "▍";
+    color: var(--accent);
+    animation: blink 1s steps(2) infinite;
   }
+
+  @keyframes blink { to { visibility: hidden; } }
 
   .msg.error {
     background: rgba(226, 114, 91, 0.12);
@@ -131,6 +135,46 @@
     font-size: 11px;
     opacity: 0.6;
     margin-top: 6px;
+    white-space: normal;
+  }
+
+  .msg pre {
+    background: rgba(0, 0, 0, 0.35);
+    padding: 10px 12px;
+    border-radius: 8px;
+    overflow-x: auto;
+    white-space: pre;
+    font-size: 13px;
+    line-height: 1.4;
+    margin: 6px 0;
+  }
+
+  .msg code {
+    font-family: var(--mono);
+    font-size: 0.92em;
+  }
+
+  .msg :not(pre) > code {
+    background: rgba(255, 255, 255, 0.08);
+    padding: 1px 5px;
+    border-radius: 4px;
+  }
+
+  .msg.user :not(pre) > code {
+    background: rgba(0, 0, 0, 0.12);
+  }
+
+  .retry-btn {
+    display: block;
+    margin-top: 8px;
+    padding: 6px 12px;
+    border-radius: 6px;
+    border: 1px solid rgba(226, 114, 91, 0.5);
+    background: none;
+    color: var(--error);
+    font-size: 13px;
+    font-family: inherit;
+    cursor: pointer;
   }
 
   #empty-state {
@@ -166,10 +210,10 @@
     border-radius: 20px;
     color: var(--text);
     padding: 10px 16px;
-    font-size: 15px;
+    font-size: 16px; /* 16px stops iOS zooming the page on focus */
     font-family: inherit;
     resize: none;
-    max-height: 120px;
+    max-height: 140px;
     outline: none;
   }
 
@@ -189,11 +233,17 @@
     cursor: pointer;
   }
 
-  #send-btn:disabled {
-    opacity: 0.4;
+  #send-btn:disabled { opacity: 0.4; }
+
+  #send-btn.stop {
+    background: var(--error);
+    color: #fff;
   }
 
   #send-btn svg { width: 18px; height: 18px; }
+  #send-btn .icon-stop { display: none; }
+  #send-btn.stop .icon-send { display: none; }
+  #send-btn.stop .icon-stop { display: block; }
 
   /* ---------- Settings drawer ---------- */
   #settings-overlay {
@@ -213,7 +263,7 @@
     bottom: 0;
     width: min(340px, 88vw);
     background: var(--surface-raised);
-    padding: max(20px, env(safe-area-inset-top)) 18px 20px;
+    padding: max(20px, env(safe-area-inset-top)) 18px max(20px, env(safe-area-inset-bottom));
     overflow-y: auto;
     transform: translateX(100%);
     transition: transform 0.2s ease;
@@ -240,15 +290,25 @@
   }
 
   #settings-panel input,
-  #settings-panel select {
+  #settings-panel select,
+  #settings-panel textarea {
     width: 100%;
     background: var(--surface);
     border: 1px solid var(--border);
     color: var(--text);
     padding: 10px 12px;
     border-radius: 8px;
-    font-size: 14px;
+    font-size: 16px;
     font-family: inherit;
+  }
+
+  #settings-panel textarea {
+    resize: vertical;
+    min-height: 60px;
+  }
+
+  #settings-panel #model-filter {
+    margin-bottom: 6px;
   }
 
   #settings-panel .hint {
@@ -276,8 +336,10 @@
   .btn-row {
     display: flex;
     gap: 10px;
-    margin-top: 22px;
+    margin-top: 12px;
   }
+
+  .btn-row:first-of-type { margin-top: 22px; }
 
   .btn {
     flex: 1;
@@ -287,6 +349,7 @@
     background: var(--surface);
     color: var(--text);
     font-size: 14px;
+    font-family: inherit;
     cursor: pointer;
   }
 
@@ -322,17 +385,13 @@
   </button>
 </header>
 
-<div id="messages">
-  <div id="empty-state">
-    <strong>Nothing sent yet</strong>
-    Open settings, add your OpenRouter key and pick a model, then start typing.
-  </div>
-</div>
+<div id="messages"></div>
 
 <div id="input-bar">
   <textarea id="composer" rows="1" placeholder="Message…" disabled></textarea>
   <button id="send-btn" disabled aria-label="Send">
-    <svg viewBox="0 0 24 24" fill="currentColor"><path d="M2 21l21-9L2 3v7l15 2-15 2z"/></svg>
+    <svg class="icon-send" viewBox="0 0 24 24" fill="currentColor"><path d="M2 21l21-9L2 3v7l15 2-15 2z"/></svg>
+    <svg class="icon-stop" viewBox="0 0 24 24" fill="currentColor"><rect x="5" y="5" width="14" height="14" rx="2"/></svg>
   </button>
 </div>
 
@@ -347,7 +406,8 @@
     </div>
 
     <div class="field">
-      <label for="model-select">Model</label>
+      <label for="model-filter">Model</label>
+      <input type="search" id="model-filter" placeholder="Filter, e.g. claude, gpt, :free" autocomplete="off" autocapitalize="off" spellcheck="false">
       <select id="model-select">
         <option value="">Loading models…</option>
       </select>
@@ -356,7 +416,7 @@
 
     <div class="field">
       <label for="system-prompt">System prompt (optional)</label>
-      <input type="text" id="system-prompt" placeholder="e.g. Be concise.">
+      <textarea id="system-prompt" rows="2" placeholder="e.g. Be concise."></textarea>
     </div>
 
     <div class="btn-row">
@@ -381,14 +441,16 @@
 (function () {
   "use strict";
 
+  var OPENROUTER = "https://openrouter.ai/api/v1";
+  var APP_TITLE = "OpenRouter Chat";
+
   /* ---------------- Storage: localStorage with in-memory fallback ---------------- */
-  const memoryStore = {};
-  let usingMemoryFallback = false;
+  var memoryStore = {};
+  var usingMemoryFallback = false;
 
   function storageGet(key) {
     try {
-      const v = window.localStorage.getItem(key);
-      return v;
+      return window.localStorage.getItem(key);
     } catch (e) {
       usingMemoryFallback = true;
       return Object.prototype.hasOwnProperty.call(memoryStore, key) ? memoryStore[key] : null;
@@ -412,7 +474,7 @@
     }
   }
 
-  const KEYS = {
+  var KEYS = {
     apiKey: "orc_api_key",
     model: "orc_model",
     systemPrompt: "orc_system_prompt",
@@ -420,57 +482,163 @@
   };
 
   /* ---------------- State ---------------- */
-  let history = [];
+  // history entries: { role: "user"|"assistant", content, model?, usage?, stopped? }
+  // Errors are deliberately NOT stored: they are transient UI, never API input.
+  var history = [];
   try {
-    history = JSON.parse(storageGet(KEYS.history) || "[]");
+    var parsed = JSON.parse(storageGet(KEYS.history) || "[]");
+    if (Array.isArray(parsed)) {
+      history = parsed.filter(function (m) {
+        return m && (m.role === "user" || m.role === "assistant") && typeof m.content === "string";
+      });
+    }
   } catch (e) {
     history = [];
   }
 
-  let isStreaming = false;
+  var isStreaming = false;
+  var currentAbort = null;
+  var allModels = [];         // [{ id, name }]
+  var chosenModel = storageGet(KEYS.model) || "";
+  var stickToBottom = true;
 
   /* ---------------- DOM refs ---------------- */
-  const messagesEl = document.getElementById("messages");
-  const composerEl = document.getElementById("composer");
-  const sendBtn = document.getElementById("send-btn");
-  const settingsOverlay = document.getElementById("settings-overlay");
-  const openSettingsBtn = document.getElementById("open-settings");
-  const apiKeyInput = document.getElementById("api-key");
-  const modelSelect = document.getElementById("model-select");
-  const systemPromptInput = document.getElementById("system-prompt");
-  const saveSettingsBtn = document.getElementById("save-settings");
-  const clearChatBtn = document.getElementById("clear-chat");
-  const forgetKeyBtn = document.getElementById("forget-key");
-  const currentModelLabel = document.getElementById("current-model-label");
-  const storageStatus = document.getElementById("storage-status");
-  const modelRefreshHint = document.getElementById("model-refresh-hint");
+  var messagesEl = document.getElementById("messages");
+  var composerEl = document.getElementById("composer");
+  var sendBtn = document.getElementById("send-btn");
+  var settingsOverlay = document.getElementById("settings-overlay");
+  var openSettingsBtn = document.getElementById("open-settings");
+  var apiKeyInput = document.getElementById("api-key");
+  var modelFilter = document.getElementById("model-filter");
+  var modelSelect = document.getElementById("model-select");
+  var systemPromptInput = document.getElementById("system-prompt");
+  var saveSettingsBtn = document.getElementById("save-settings");
+  var clearChatBtn = document.getElementById("clear-chat");
+  var forgetKeyBtn = document.getElementById("forget-key");
+  var currentModelLabel = document.getElementById("current-model-label");
+  var storageStatus = document.getElementById("storage-status");
+  var modelRefreshHint = document.getElementById("model-refresh-hint");
 
-  /* ---------------- Rendering ---------------- */
-  function renderHistory() {
-    messagesEl.innerHTML = "";
-    if (history.length === 0) {
-      const empty = document.createElement("div");
-      empty.id = "empty-state";
-      empty.innerHTML = "<strong>Nothing sent yet</strong>Open settings, add your OpenRouter key and pick a model, then start typing.";
-      messagesEl.appendChild(empty);
-      return;
-    }
-    history.forEach(function (m) {
-      appendMessageEl(m.role, m.content);
+  /* ---------------- Minimal, escape-first markdown ----------------
+     Supports fenced code blocks, inline code and **bold**. Everything is
+     HTML-escaped before any tag is introduced, so model output can never
+     inject markup. Plain newlines are preserved by the pre-wrap CSS. */
+  function escapeHtml(s) {
+    return s.replace(/[&<>"']/g, function (c) {
+      return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
     });
-    scrollToBottom();
   }
 
-  function appendMessageEl(role, content) {
-    const el = document.createElement("div");
-    el.className = "msg " + (role === "user" ? "user" : role === "error" ? "error" : "assistant");
-    el.textContent = content;
+  function renderInline(escaped) {
+    return escaped
+      .replace(/`([^`\n]+)`/g, "<code>$1</code>")
+      .replace(/\*\*([^*\n][^*]*?)\*\*/g, "<strong>$1</strong>");
+  }
+
+  function renderMarkdown(text) {
+    var parts = text.split("```");
+    var html = "";
+    for (var i = 0; i < parts.length; i++) {
+      var part = parts[i];
+      if (i % 2 === 1) {
+        // Code block. Drop a leading language tag line if present.
+        var nl = part.indexOf("\n");
+        if (nl !== -1 && /^[\w+#.-]*\s*$/.test(part.slice(0, nl))) part = part.slice(nl + 1);
+        html += "<pre><code>" + escapeHtml(part.replace(/\n$/, "")) + "</code></pre>";
+      } else {
+        // Trim the newline that hugs a fence so pre-wrap doesn't add blank lines.
+        if (i > 0) part = part.replace(/^\n/, "");
+        if (i < parts.length - 1) part = part.replace(/\n$/, "");
+        html += renderInline(escapeHtml(part));
+      }
+    }
+    return html;
+  }
+
+  /* ---------------- Rendering ---------------- */
+  function isNearBottom() {
+    return messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight < 80;
+  }
+
+  messagesEl.addEventListener("scroll", function () {
+    stickToBottom = isNearBottom();
+  });
+
+  function scrollToBottom(force) {
+    if (force || stickToBottom) {
+      messagesEl.scrollTop = messagesEl.scrollHeight;
+      stickToBottom = true;
+    }
+  }
+
+  function formatMeta(m) {
+    var bits = [];
+    if (m.model) bits.push(m.model);
+    if (m.usage) {
+      var pt = m.usage.prompt_tokens, ct = m.usage.completion_tokens;
+      if (typeof pt === "number" && typeof ct === "number") bits.push(pt + "→" + ct + " tokens");
+      if (typeof m.usage.cost === "number") bits.push("$" + m.usage.cost.toFixed(4));
+    }
+    if (m.stopped) bits.push("stopped");
+    return bits.join(" · ");
+  }
+
+  function appendMessageEl(m) {
+    var el = document.createElement("div");
+    el.className = "msg " + m.role;
+    if (m.role === "assistant") {
+      el.innerHTML = renderMarkdown(m.content);
+      var meta = formatMeta(m);
+      if (meta) {
+        var metaEl = document.createElement("span");
+        metaEl.className = "meta";
+        metaEl.textContent = meta;
+        el.appendChild(metaEl);
+      }
+    } else {
+      el.textContent = m.content;
+    }
     messagesEl.appendChild(el);
     return el;
   }
 
-  function scrollToBottom() {
-    messagesEl.scrollTop = messagesEl.scrollHeight;
+  function showError(message, canRetry) {
+    var el = document.createElement("div");
+    el.className = "msg error transient";
+    el.textContent = message;
+    if (canRetry) {
+      var btn = document.createElement("button");
+      btn.className = "retry-btn";
+      btn.type = "button";
+      btn.textContent = "Retry";
+      btn.addEventListener("click", function () { sendMessage(true); });
+      el.appendChild(btn);
+    }
+    messagesEl.appendChild(el);
+    scrollToBottom(true);
+    return el;
+  }
+
+  function removeTransient() {
+    var nodes = messagesEl.querySelectorAll(".transient");
+    for (var i = 0; i < nodes.length; i++) nodes[i].remove();
+  }
+
+  function renderHistory() {
+    messagesEl.innerHTML = "";
+    if (history.length === 0) {
+      var empty = document.createElement("div");
+      empty.id = "empty-state";
+      empty.className = "transient";
+      empty.innerHTML = "<strong>Nothing sent yet</strong>Open settings, add your OpenRouter key and pick a model, then start typing.";
+      messagesEl.appendChild(empty);
+      return;
+    }
+    history.forEach(appendMessageEl);
+    if (history[history.length - 1].role === "user") {
+      showError("No reply was received for the last message.", true);
+    }
+    scrollToBottom(true);
   }
 
   function persistHistory() {
@@ -478,59 +646,78 @@
   }
 
   /* ---------------- Settings ---------------- */
-  function loadSettingsIntoForm() {
-    apiKeyInput.value = storageGet(KEYS.apiKey) || "";
-    systemPromptInput.value = storageGet(KEYS.systemPrompt) || "";
-    const savedModel = storageGet(KEYS.model) || "";
-    if (savedModel) {
-      updateModelLabel(savedModel);
-    }
-  }
-
   function updateModelLabel(modelId) {
     currentModelLabel.textContent = modelId || "No model selected";
   }
 
   function updateComposerEnabled() {
-    const hasKey = !!storageGet(KEYS.apiKey);
-    const hasModel = !!storageGet(KEYS.model);
-    const ready = hasKey && hasModel;
+    var ready = !!storageGet(KEYS.apiKey) && !!storageGet(KEYS.model);
     composerEl.disabled = !ready;
-    sendBtn.disabled = !ready || isStreaming;
+    sendBtn.disabled = !ready && !isStreaming;
     composerEl.placeholder = ready ? "Message…" : "Add a key and model in settings first";
+  }
+
+  function setStreamingUI(on) {
+    isStreaming = on;
+    sendBtn.classList.toggle("stop", on);
+    sendBtn.setAttribute("aria-label", on ? "Stop" : "Send");
+    updateComposerEnabled();
+  }
+
+  function loadSettingsIntoForm() {
+    apiKeyInput.value = storageGet(KEYS.apiKey) || "";
+    systemPromptInput.value = storageGet(KEYS.systemPrompt) || "";
+    chosenModel = storageGet(KEYS.model) || "";
+    updateModelLabel(chosenModel);
+    rebuildModelOptions();
+  }
+
+  function addOption(value, label) {
+    var opt = document.createElement("option");
+    opt.value = value;
+    opt.textContent = label;
+    modelSelect.appendChild(opt);
+  }
+
+  function rebuildModelOptions() {
+    var q = modelFilter.value.trim().toLowerCase();
+    var list = allModels.filter(function (m) {
+      return !q || m.id.toLowerCase().indexOf(q) !== -1 || m.name.toLowerCase().indexOf(q) !== -1;
+    });
+    modelSelect.innerHTML = "";
+    if (allModels.length === 0) {
+      addOption("", chosenModel ? chosenModel + " (list not loaded)" : "No models loaded yet");
+      if (chosenModel) modelSelect.options[0].value = chosenModel;
+      return;
+    }
+    var chosenInList = chosenModel && list.some(function (m) { return m.id === chosenModel; });
+    if (chosenModel && !chosenInList) addOption(chosenModel, chosenModel + " (current)");
+    if (!chosenModel) addOption("", "Choose a model…");
+    list.forEach(function (m) { addOption(m.id, m.name); });
+    modelSelect.value = chosenModel;
+    modelRefreshHint.textContent = q
+      ? list.length + " of " + allModels.length + " models match."
+      : allModels.length + " models loaded.";
   }
 
   async function fetchModels(key) {
     modelRefreshHint.textContent = "Loading models…";
     try {
-      const headers = {};
+      var headers = {};
       if (key) headers["Authorization"] = "Bearer " + key;
-      const res = await fetch("https://openrouter.ai/api/v1/models", { headers: headers });
+      var res = await fetch(OPENROUTER + "/models", { headers: headers });
       if (!res.ok) throw new Error("HTTP " + res.status);
-      const data = await res.json();
-      const models = (data && data.data) || [];
-      modelSelect.innerHTML = "";
-      if (models.length === 0) {
-        modelSelect.innerHTML = "<option value=''>No models returned</option>";
-        modelRefreshHint.textContent = "OpenRouter returned no models — check your key.";
-        return;
-      }
-      models
-        .slice()
-        .sort(function (a, b) { return a.id.localeCompare(b.id); })
-        .forEach(function (m) {
-          const opt = document.createElement("option");
-          opt.value = m.id;
-          opt.textContent = m.id;
-          modelSelect.appendChild(opt);
-        });
-      const saved = storageGet(KEYS.model);
-      if (saved && models.some(function (m) { return m.id === saved; })) {
-        modelSelect.value = saved;
-      }
-      modelRefreshHint.textContent = models.length + " models loaded.";
+      var data = await res.json();
+      var models = (data && data.data) || [];
+      allModels = models
+        .filter(function (m) { return m && typeof m.id === "string"; })
+        .map(function (m) { return { id: m.id, name: (typeof m.name === "string" && m.name) || m.id }; })
+        .sort(function (a, b) { return a.name.localeCompare(b.name); });
+      rebuildModelOptions();
+      if (allModels.length === 0) modelRefreshHint.textContent = "OpenRouter returned no models — check your key.";
     } catch (err) {
-      modelSelect.innerHTML = "<option value=''>Couldn't load models</option>";
+      allModels = [];
+      rebuildModelOptions();
       modelRefreshHint.textContent = "Couldn't reach OpenRouter (" + err.message + "). Check your connection or key.";
     }
   }
@@ -538,10 +725,8 @@
   function openSettings() {
     loadSettingsIntoForm();
     settingsOverlay.classList.add("open");
-    const key = storageGet(KEYS.apiKey);
-    if (key && modelSelect.options.length <= 1) {
-      fetchModels(key);
-    }
+    var key = storageGet(KEYS.apiKey);
+    if (key && allModels.length === 0) fetchModels(key);
   }
 
   function closeSettings() {
@@ -554,19 +739,27 @@
   });
 
   apiKeyInput.addEventListener("change", function () {
-    const key = apiKeyInput.value.trim();
+    var key = apiKeyInput.value.trim();
     if (key) fetchModels(key);
   });
 
+  modelFilter.addEventListener("input", rebuildModelOptions);
+  modelSelect.addEventListener("change", function () {
+    if (modelSelect.value) chosenModel = modelSelect.value;
+  });
+
   saveSettingsBtn.addEventListener("click", function () {
-    const key = apiKeyInput.value.trim();
-    const model = modelSelect.value;
-    const sys = systemPromptInput.value.trim();
+    var key = apiKeyInput.value.trim();
+    // Fall back to the previously chosen model if the list never loaded, so
+    // saving never silently wipes a working selection.
+    var model = modelSelect.value || chosenModel;
+    var sys = systemPromptInput.value.trim();
 
     if (key) storageSet(KEYS.apiKey, key); else storageRemove(KEYS.apiKey);
     if (model) storageSet(KEYS.model, model); else storageRemove(KEYS.model);
     if (sys) storageSet(KEYS.systemPrompt, sys); else storageRemove(KEYS.systemPrompt);
 
+    chosenModel = model;
     updateModelLabel(model);
     updateComposerEnabled();
     closeSettings();
@@ -574,6 +767,7 @@
 
   clearChatBtn.addEventListener("click", function () {
     if (!confirm("Clear the whole conversation? This can't be undone.")) return;
+    if (currentAbort) currentAbort.abort();
     history = [];
     persistHistory();
     renderHistory();
@@ -587,122 +781,186 @@
     updateComposerEnabled();
   });
 
-  /* ---------------- Sending / streaming ---------------- */
+  /* ---------------- Composer ---------------- */
+  var coarsePointer = !!(window.matchMedia && window.matchMedia("(pointer: coarse)").matches);
+
   composerEl.addEventListener("input", function () {
     composerEl.style.height = "auto";
-    composerEl.style.height = Math.min(composerEl.scrollHeight, 120) + "px";
+    composerEl.style.height = Math.min(composerEl.scrollHeight, 140) + "px";
   });
 
   composerEl.addEventListener("keydown", function (e) {
+    // On touch devices Enter inserts a newline; the send button sends.
+    // On keyboards Enter sends and Shift+Enter inserts a newline.
+    if (coarsePointer || e.isComposing) return;
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
-      sendMessage();
+      sendMessage(false);
     }
   });
 
-  sendBtn.addEventListener("click", sendMessage);
+  sendBtn.addEventListener("click", function () {
+    if (isStreaming) {
+      if (currentAbort) currentAbort.abort();
+    } else {
+      sendMessage(false);
+    }
+  });
 
-  async function sendMessage() {
-    const text = composerEl.value.trim();
-    if (!text || isStreaming) return;
+  /* ---------------- Sending / streaming ---------------- */
+  function buildApiMessages() {
+    var out = [];
+    var sys = storageGet(KEYS.systemPrompt);
+    if (sys) out.push({ role: "system", content: sys });
+    history.forEach(function (m) {
+      if (m.role === "user" || m.role === "assistant") out.push({ role: m.role, content: m.content });
+    });
+    return out;
+  }
 
-    const key = storageGet(KEYS.apiKey);
-    const model = storageGet(KEYS.model);
+  async function sendMessage(retrying) {
+    if (isStreaming) return;
+
+    var text;
+    if (retrying) {
+      var last = history[history.length - 1];
+      if (!last || last.role !== "user") return;
+      text = last.content;
+    } else {
+      text = composerEl.value.trim();
+      if (!text) return;
+    }
+
+    var key = storageGet(KEYS.apiKey);
+    var model = storageGet(KEYS.model);
     if (!key || !model) {
       updateComposerEnabled();
       return;
     }
 
-    document.getElementById("empty-state") && (messagesEl.innerHTML = "");
+    removeTransient();
 
-    history.push({ role: "user", content: text });
-    persistHistory();
-    appendMessageEl("user", text);
-    composerEl.value = "";
-    composerEl.style.height = "auto";
-    scrollToBottom();
+    if (!retrying) {
+      history.push({ role: "user", content: text });
+      persistHistory();
+      appendMessageEl({ role: "user", content: text });
+      composerEl.value = "";
+      composerEl.style.height = "auto";
+      scrollToBottom(true);
+    }
 
-    const sys = storageGet(KEYS.systemPrompt);
-    const apiMessages = [];
-    if (sys) apiMessages.push({ role: "system", content: sys });
-    history.forEach(function (m) { apiMessages.push({ role: m.role, content: m.content }); });
+    var apiMessages = buildApiMessages();
 
-    isStreaming = true;
-    sendBtn.disabled = true;
-    const assistantEl = appendMessageEl("assistant", "");
-    scrollToBottom();
+    setStreamingUI(true);
+    currentAbort = new AbortController();
 
-    let fullText = "";
+    var assistantEl = appendMessageEl({ role: "assistant", content: "" });
+    assistantEl.classList.add("streaming");
+    scrollToBottom(true);
+
+    var fullText = "";
+    var usage = null;
+    var renderQueued = false;
+
+    function queueRender() {
+      if (renderQueued) return;
+      renderQueued = true;
+      requestAnimationFrame(function () {
+        renderQueued = false;
+        assistantEl.innerHTML = renderMarkdown(fullText);
+        scrollToBottom(false);
+      });
+    }
+
+    function finish(entry) {
+      assistantEl.remove();
+      history.push(entry);
+      persistHistory();
+      appendMessageEl(entry);
+    }
 
     try {
-      const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+      var res = await fetch(OPENROUTER + "/chat/completions", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          "Authorization": "Bearer " + key
+          "Authorization": "Bearer " + key,
+          "X-Title": APP_TITLE
         },
         body: JSON.stringify({
           model: model,
           messages: apiMessages,
-          stream: true
-        })
+          stream: true,
+          usage: { include: true }
+        }),
+        signal: currentAbort.signal
       });
 
       if (!res.ok || !res.body) {
-        const errText = await safeReadError(res);
+        var errText = await safeReadError(res);
         throw new Error("HTTP " + res.status + (errText ? ": " + errText : ""));
       }
 
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = "";
+      var reader = res.body.getReader();
+      var decoder = new TextDecoder();
+      var buffer = "";
 
       while (true) {
-        const chunk = await reader.read();
+        var chunk = await reader.read();
         if (chunk.done) break;
         buffer += decoder.decode(chunk.value, { stream: true });
 
-        const lines = buffer.split("\n");
+        var lines = buffer.split("\n");
         buffer = lines.pop();
 
-        for (const line of lines) {
-          const trimmed = line.trim();
-          if (!trimmed.startsWith("data:")) continue;
-          const payload = trimmed.slice(5).trim();
+        for (var i = 0; i < lines.length; i++) {
+          var trimmed = lines[i].trim();
+          if (trimmed.indexOf("data:") !== 0) continue;
+          var payload = trimmed.slice(5).trim();
           if (payload === "[DONE]") continue;
+          var json;
           try {
-            const json = JSON.parse(payload);
-            const delta = json.choices && json.choices[0] && json.choices[0].delta;
-            const piece = delta && delta.content;
-            if (piece) {
-              fullText += piece;
-              assistantEl.textContent = fullText;
-              scrollToBottom();
-            }
+            json = JSON.parse(payload);
           } catch (parseErr) {
-            /* ignore malformed SSE fragments */
+            continue; // malformed SSE fragment
           }
+          if (json.error) {
+            throw new Error(json.error.message || "Model returned an error");
+          }
+          var choice = json.choices && json.choices[0];
+          var piece = choice && choice.delta && choice.delta.content;
+          if (piece) {
+            fullText += piece;
+            queueRender();
+          }
+          if (json.usage) usage = json.usage;
         }
       }
 
-      if (!fullText) fullText = "(empty response)";
-      history.push({ role: "assistant", content: fullText });
-      persistHistory();
+      if (!fullText) throw new Error("The model returned an empty response");
+      finish({ role: "assistant", content: fullText, model: model, usage: usage });
     } catch (err) {
-      assistantEl.remove();
-      history.push({ role: "error", content: "Request failed: " + err.message });
-      appendMessageEl("error", "Request failed: " + err.message);
-      persistHistory();
+      if (err.name === "AbortError") {
+        if (fullText) {
+          finish({ role: "assistant", content: fullText, model: model, usage: usage, stopped: true });
+        } else {
+          assistantEl.remove();
+          showError("Stopped before any reply arrived.", true);
+        }
+      } else {
+        assistantEl.remove();
+        showError("Request failed: " + err.message, true);
+      }
     } finally {
-      isStreaming = false;
-      updateComposerEnabled();
-      scrollToBottom();
+      currentAbort = null;
+      setStreamingUI(false);
+      scrollToBottom(false);
     }
   }
 
   async function safeReadError(res) {
     try {
-      const j = await res.json();
+      var j = await res.json();
       return (j && j.error && j.error.message) || "";
     } catch (e) {
       return "";
@@ -724,11 +982,11 @@
   }
 
   /* ---------------- Init ---------------- */
-  loadSettingsIntoForm();
+  updateModelLabel(chosenModel);
   renderHistory();
   updateComposerEnabled();
   updateStorageStatus();
-  const savedKeyOnLoad = storageGet(KEYS.apiKey);
+  var savedKeyOnLoad = storageGet(KEYS.apiKey);
   if (savedKeyOnLoad) fetchModels(savedKeyOnLoad);
 })();
 </script>

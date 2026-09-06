@@ -17,6 +17,18 @@ just static files.
   restrictive embedded browser, etc.), the app falls back to holding your key
   and history in memory for that session instead of breaking.
 
+## Features
+
+- Streaming replies with a **Stop** button (partial text is kept).
+- **Retry** on any failed request, including one left dangling by a reload.
+- Model picker with a text filter (try `claude`, `gpt`, or `:free`).
+- Per-reply footer showing model, token counts and cost, as reported by
+  OpenRouter.
+- Fenced code blocks, inline code and **bold** are rendered; everything else
+  stays as plain text. All model output is HTML-escaped first.
+- On a phone, Enter inserts a newline and the button sends. With a physical
+  keyboard, Enter sends and Shift+Enter inserts a newline.
+
 ## Security notes (read before adding a real key)
 
 - **This repo is public.** Never commit your API key into any file — not in
@@ -44,18 +56,24 @@ Then open the printed URL in a browser.
 
 1. Repo **Settings → Pages**.
 2. Under "Build and deployment", set Source to **Deploy from a branch**.
-3. Branch: `main`, folder: `/ (root)`. Save.
+3. Pick the branch the app lives on (`main` once merged), folder: `/ (root)`. Save.
 4. GitHub gives you a URL like `https://soulfiremage.github.io/openrouter-claude/`.
 5. Open that URL in Chrome on Android → menu → **Add to Home screen**.
 
+After changing `index.html`, `manifest.json` or `icon.svg`, bump `CACHE_NAME`
+in `sw.js` so installed copies pick up the new shell on their next launch.
+
 ## Status
 
-Skeleton only — UI, settings, streaming chat logic, and local storage are in
-place, but it hasn't been tested against a live key yet. Once you've reviewed
-the code, add a key in the running app (not in the repo) and try a message.
+Reviewed and tested end-to-end in headless Chromium against a mocked
+OpenRouter API (streaming, markdown, errors, retry, stop, reload persistence,
+HTML escaping). Not yet exercised against a live key: add one in the running
+app (never in the repo) and try a message.
 
 ## Ideas for later
 
 - Per-conversation history instead of one running thread.
-- Markdown/code-block rendering in assistant messages.
-- Per-message cost display (OpenRouter returns usage/cost in the response).
+- Fuller markdown (lists, headings, links, tables).
+- Cap or summarise old history so long threads don't grow the per-request cost
+  without bound.
+- PNG icons (192/512 px) if Chrome declines the full install prompt with SVG only.
