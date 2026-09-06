@@ -21,7 +21,9 @@ just static files.
 
 - Streaming replies with a **Stop** button (partial text is kept).
 - **Retry** on any failed request, including one left dangling by a reload.
-- Model picker with a text filter (try `claude`, `gpt`, or `:free`).
+- Model picker with provider, capability (vision, reasoning, tools) and budget
+  filters plus text search, grouped by provider, with context window and
+  per-million-token pricing shown for the selected model.
 - Per-reply footer showing model, token counts and cost, as reported by
   OpenRouter.
 - Fenced code blocks, inline code and **bold** are rendered; everything else

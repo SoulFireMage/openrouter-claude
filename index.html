@@ -307,8 +307,29 @@
     min-height: 60px;
   }
 
-  #settings-panel #model-filter {
+  #settings-panel #model-filter,
+  #settings-panel .filter-grid {
     margin-bottom: 6px;
+  }
+
+  .filter-grid {
+    display: grid;
+    gap: 6px;
+  }
+
+  #model-info {
+    color: var(--text);
+  }
+
+  .link-btn {
+    background: none;
+    border: none;
+    padding: 0;
+    margin-top: 8px;
+    color: var(--accent);
+    font-size: 12px;
+    font-family: inherit;
+    cursor: pointer;
   }
 
   #settings-panel .hint {
@@ -406,12 +427,32 @@
     </div>
 
     <div class="field">
-      <label for="model-filter">Model</label>
-      <input type="search" id="model-filter" placeholder="Filter, e.g. claude, gpt, :free" autocomplete="off" autocapitalize="off" spellcheck="false">
+      <label for="filter-provider">Model</label>
+      <div class="filter-grid">
+        <select id="filter-provider" aria-label="Provider">
+          <option value="">Any provider</option>
+        </select>
+        <select id="filter-capability" aria-label="Capability">
+          <option value="">Any capability</option>
+          <option value="vision">Vision (image input)</option>
+          <option value="reasoning">Reasoning</option>
+          <option value="tools">Tool calling</option>
+        </select>
+        <select id="filter-budget" aria-label="Budget">
+          <option value="">Any price</option>
+          <option value="free">Free</option>
+          <option value="low">Under $1 per 1M output tokens</option>
+          <option value="mid">$1 to $10 per 1M output tokens</option>
+          <option value="high">Over $10 per 1M output tokens</option>
+        </select>
+      </div>
+      <input type="search" id="model-filter" placeholder="Search name or id…" autocomplete="off" autocapitalize="off" spellcheck="false">
       <select id="model-select">
         <option value="">Loading models…</option>
       </select>
       <div class="hint" id="model-refresh-hint">Models load automatically once a key is saved.</div>
+      <div class="hint" id="model-info"></div>
+      <button type="button" class="link-btn" id="reset-filters">Reset filters</button>
     </div>
 
     <div class="field">
@@ -478,7 +519,8 @@
     apiKey: "orc_api_key",
     model: "orc_model",
     systemPrompt: "orc_system_prompt",
-    history: "orc_history"
+    history: "orc_history",
+    filters: "orc_filters"
   };
 
   /* ---------------- State ---------------- */
@@ -498,8 +540,15 @@
 
   var isStreaming = false;
   var currentAbort = null;
-  var allModels = [];         // [{ id, name }]
+  var allModels = [];         // normalised model records, see normaliseModel()
   var chosenModel = storageGet(KEYS.model) || "";
+  var filters = { provider: "", capability: "", budget: "", text: "" };
+  try {
+    var savedFilters = JSON.parse(storageGet(KEYS.filters) || "{}");
+    Object.keys(filters).forEach(function (k) {
+      if (typeof savedFilters[k] === "string") filters[k] = savedFilters[k];
+    });
+  } catch (e) { /* keep defaults */ }
   var stickToBottom = true;
 
   /* ---------------- DOM refs ---------------- */
@@ -510,6 +559,11 @@
   var openSettingsBtn = document.getElementById("open-settings");
   var apiKeyInput = document.getElementById("api-key");
   var modelFilter = document.getElementById("model-filter");
+  var filterProvider = document.getElementById("filter-provider");
+  var filterCapability = document.getElementById("filter-capability");
+  var filterBudget = document.getElementById("filter-budget");
+  var resetFiltersBtn = document.getElementById("reset-filters");
+  var modelInfo = document.getElementById("model-info");
   var modelSelect = document.getElementById("model-select");
   var systemPromptInput = document.getElementById("system-prompt");
   var saveSettingsBtn = document.getElementById("save-settings");
@@ -669,35 +723,158 @@
     systemPromptInput.value = storageGet(KEYS.systemPrompt) || "";
     chosenModel = storageGet(KEYS.model) || "";
     updateModelLabel(chosenModel);
+    syncFilterControls();
     rebuildModelOptions();
   }
 
-  function addOption(value, label) {
+  /* ---------------- Model catalogue ----------------
+     OpenRouter's /models entries carry pricing (USD per token, as strings),
+     architecture.input_modalities, supported_parameters and context_length.
+     Everything here is read defensively: a missing field just means "unknown". */
+  function perMillion(v) {
+    var n = parseFloat(v);
+    return isFinite(n) && n >= 0 ? n * 1e6 : null;
+  }
+
+  function normaliseModel(m) {
+    var id = m.id;
+    var name = (typeof m.name === "string" && m.name) || id;
+    var provider = name.indexOf(":") !== -1 ? name.slice(0, name.indexOf(":")).trim() : id.split("/")[0];
+    var pricing = m.pricing || {};
+    var arch = m.architecture || {};
+    var inputs = Array.isArray(arch.input_modalities) ? arch.input_modalities
+      : (typeof arch.modality === "string" ? arch.modality.split("->")[0].split("+") : []);
+    var params = Array.isArray(m.supported_parameters) ? m.supported_parameters : [];
+    var inPrice = perMillion(pricing.prompt);
+    var outPrice = perMillion(pricing.completion);
+    var top = m.top_provider || {};
+    return {
+      id: id,
+      name: name,
+      provider: provider,
+      inPrice: inPrice,
+      outPrice: outPrice,
+      free: /:free$/.test(id) || (inPrice === 0 && outPrice === 0),
+      vision: inputs.indexOf("image") !== -1,
+      reasoning: params.indexOf("reasoning") !== -1 || params.indexOf("include_reasoning") !== -1,
+      tools: params.indexOf("tools") !== -1,
+      context: (typeof m.context_length === "number" && m.context_length) || (typeof top.context_length === "number" && top.context_length) || null
+    };
+  }
+
+  function matchesFilters(m) {
+    if (filters.provider && m.provider !== filters.provider) return false;
+    if (filters.capability === "vision" && !m.vision) return false;
+    if (filters.capability === "reasoning" && !m.reasoning) return false;
+    if (filters.capability === "tools" && !m.tools) return false;
+    if (filters.budget) {
+      if (filters.budget === "free") { if (!m.free) return false; }
+      else if (m.outPrice === null) return false;
+      else if (filters.budget === "low" && m.outPrice >= 1) return false;
+      else if (filters.budget === "mid" && (m.outPrice < 1 || m.outPrice >= 10)) return false;
+      else if (filters.budget === "high" && m.outPrice < 10) return false;
+    }
+    if (filters.text) {
+      var q = filters.text;
+      if (m.id.toLowerCase().indexOf(q) === -1 && m.name.toLowerCase().indexOf(q) === -1) return false;
+    }
+    return true;
+  }
+
+  function fmtPrice(x) {
+    if (x === null) return "?";
+    if (x === 0) return "$0";
+    return "$" + (x < 0.1 ? x.toFixed(3) : x.toFixed(2));
+  }
+
+  function fmtContext(n) {
+    if (!n) return null;
+    if (n >= 1e6) return (n / 1e6).toFixed(n % 1e6 ? 1 : 0) + "M context";
+    if (n >= 1000) return Math.round(n / 1000) + "k context";
+    return n + " context";
+  }
+
+  function describeModel(m) {
+    var bits = [];
+    var ctx = fmtContext(m.context);
+    if (ctx) bits.push(ctx);
+    if (m.free) bits.push("free");
+    else if (m.inPrice !== null || m.outPrice !== null) bits.push(fmtPrice(m.inPrice) + " in / " + fmtPrice(m.outPrice) + " out per 1M tokens");
+    if (m.vision) bits.push("vision");
+    if (m.reasoning) bits.push("reasoning");
+    if (m.tools) bits.push("tools");
+    return bits.join(" · ");
+  }
+
+  function updateModelInfo() {
+    var id = modelSelect.value || chosenModel;
+    var m = null;
+    for (var i = 0; i < allModels.length; i++) if (allModels[i].id === id) { m = allModels[i]; break; }
+    modelInfo.textContent = m ? describeModel(m) : "";
+  }
+
+  function persistFilters() {
+    storageSet(KEYS.filters, JSON.stringify(filters));
+  }
+
+  function syncFilterControls() {
+    filterProvider.value = filters.provider;
+    if (filterProvider.value !== filters.provider) { filters.provider = ""; filterProvider.value = ""; }
+    filterCapability.value = filters.capability;
+    filterBudget.value = filters.budget;
+    modelFilter.value = filters.text;
+  }
+
+  function addOption(parent, value, label) {
     var opt = document.createElement("option");
     opt.value = value;
     opt.textContent = label;
-    modelSelect.appendChild(opt);
+    parent.appendChild(opt);
+  }
+
+  function rebuildProviderOptions() {
+    var counts = {};
+    allModels.forEach(function (m) { counts[m.provider] = (counts[m.provider] || 0) + 1; });
+    var providers = Object.keys(counts).sort(function (a, b) { return a.localeCompare(b); });
+    filterProvider.innerHTML = "";
+    addOption(filterProvider, "", "Any provider");
+    providers.forEach(function (p) { addOption(filterProvider, p, p + " (" + counts[p] + ")"); });
+    syncFilterControls();
   }
 
   function rebuildModelOptions() {
-    var q = modelFilter.value.trim().toLowerCase();
-    var list = allModels.filter(function (m) {
-      return !q || m.id.toLowerCase().indexOf(q) !== -1 || m.name.toLowerCase().indexOf(q) !== -1;
-    });
     modelSelect.innerHTML = "";
     if (allModels.length === 0) {
-      addOption("", chosenModel ? chosenModel + " (list not loaded)" : "No models loaded yet");
-      if (chosenModel) modelSelect.options[0].value = chosenModel;
+      addOption(modelSelect, chosenModel || "", chosenModel ? chosenModel + " (list not loaded)" : "No models loaded yet");
+      updateModelInfo();
       return;
     }
+    var list = allModels.filter(matchesFilters);
     var chosenInList = chosenModel && list.some(function (m) { return m.id === chosenModel; });
-    if (chosenModel && !chosenInList) addOption(chosenModel, chosenModel + " (current)");
-    if (!chosenModel) addOption("", "Choose a model…");
-    list.forEach(function (m) { addOption(m.id, m.name); });
+    if (chosenModel && !chosenInList) addOption(modelSelect, chosenModel, chosenModel + " (current)");
+    if (!chosenModel) addOption(modelSelect, "", "Choose a model…");
+
+    if (filters.provider) {
+      list.forEach(function (m) { addOption(modelSelect, m.id, m.name); });
+    } else {
+      // Group by provider so the native picker shows headers.
+      var group = null, groupName = null;
+      list.forEach(function (m) {
+        if (m.provider !== groupName) {
+          groupName = m.provider;
+          group = document.createElement("optgroup");
+          group.label = groupName;
+          modelSelect.appendChild(group);
+        }
+        addOption(group, m.id, m.name);
+      });
+    }
     modelSelect.value = chosenModel;
-    modelRefreshHint.textContent = q
+    var anyFilter = filters.provider || filters.capability || filters.budget || filters.text;
+    modelRefreshHint.textContent = anyFilter
       ? list.length + " of " + allModels.length + " models match."
       : allModels.length + " models loaded.";
+    updateModelInfo();
   }
 
   async function fetchModels(key) {
@@ -711,12 +888,16 @@
       var models = (data && data.data) || [];
       allModels = models
         .filter(function (m) { return m && typeof m.id === "string"; })
-        .map(function (m) { return { id: m.id, name: (typeof m.name === "string" && m.name) || m.id }; })
-        .sort(function (a, b) { return a.name.localeCompare(b.name); });
+        .map(normaliseModel)
+        .sort(function (a, b) {
+          return a.provider.localeCompare(b.provider) || a.name.localeCompare(b.name);
+        });
+      rebuildProviderOptions();
       rebuildModelOptions();
       if (allModels.length === 0) modelRefreshHint.textContent = "OpenRouter returned no models — check your key.";
     } catch (err) {
       allModels = [];
+      rebuildProviderOptions();
       rebuildModelOptions();
       modelRefreshHint.textContent = "Couldn't reach OpenRouter (" + err.message + "). Check your connection or key.";
     }
@@ -743,9 +924,28 @@
     if (key) fetchModels(key);
   });
 
-  modelFilter.addEventListener("input", rebuildModelOptions);
+  function onFilterChange() {
+    filters.provider = filterProvider.value;
+    filters.capability = filterCapability.value;
+    filters.budget = filterBudget.value;
+    filters.text = modelFilter.value.trim().toLowerCase();
+    persistFilters();
+    rebuildModelOptions();
+  }
+
+  filterProvider.addEventListener("change", onFilterChange);
+  filterCapability.addEventListener("change", onFilterChange);
+  filterBudget.addEventListener("change", onFilterChange);
+  modelFilter.addEventListener("input", onFilterChange);
+  resetFiltersBtn.addEventListener("click", function () {
+    filters = { provider: "", capability: "", budget: "", text: "" };
+    persistFilters();
+    syncFilterControls();
+    rebuildModelOptions();
+  });
   modelSelect.addEventListener("change", function () {
     if (modelSelect.value) chosenModel = modelSelect.value;
+    updateModelInfo();
   });
 
   saveSettingsBtn.addEventListener("click", function () {
