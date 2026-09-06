@@ -627,7 +627,10 @@
 
   function formatMeta(m) {
     var bits = [];
-    if (m.model) bits.push(m.model);
+    // m.model is what OpenRouter reported as serving the reply; m.requested
+    // is what the client asked for. They should match. If they don't, say so.
+    if (m.model) bits.push(m.model + (m.provider ? " via " + m.provider : ""));
+    if (m.requested && m.model && m.requested !== m.model) bits.push("requested " + m.requested);
     if (m.usage) {
       var pt = m.usage.prompt_tokens, ct = m.usage.completion_tokens;
       if (typeof pt === "number" && typeof ct === "number") bits.push(pt + "→" + ct + " tokens");
@@ -1060,6 +1063,8 @@
 
     var fullText = "";
     var usage = null;
+    var servedModel = null;
+    var servedProvider = null;
     var renderQueued = false;
 
     function queueRender() {
@@ -1134,15 +1139,17 @@
             queueRender();
           }
           if (json.usage) usage = json.usage;
+          if (typeof json.model === "string" && json.model) servedModel = json.model;
+          if (typeof json.provider === "string" && json.provider) servedProvider = json.provider;
         }
       }
 
       if (!fullText) throw new Error("The model returned an empty response");
-      finish({ role: "assistant", content: fullText, model: model, usage: usage });
+      finish({ role: "assistant", content: fullText, model: servedModel || model, requested: model, provider: servedProvider, usage: usage });
     } catch (err) {
       if (err.name === "AbortError") {
         if (fullText) {
-          finish({ role: "assistant", content: fullText, model: model, usage: usage, stopped: true });
+          finish({ role: "assistant", content: fullText, model: servedModel || model, requested: model, provider: servedProvider, usage: usage, stopped: true });
         } else {
           assistantEl.remove();
           showError("Stopped before any reply arrived.", true);
