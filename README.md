@@ -30,8 +30,10 @@ just static files.
   per-million-token pricing shown for the selected model.
 - Per-reply footer showing model, token counts and cost, as reported by
   OpenRouter.
-- Fenced code blocks, inline code and **bold** are rendered; everything else
-  stays as plain text. All model output is HTML-escaped first.
+- Full markdown (headings, lists, tables, quotes, links, code) and LaTeX
+  maths (`$...$`, `$$...$$`, `\(...\)`, `\[...\]`) in replies, rendered with
+  marked and KaTeX and sanitised with DOMPurify. Raw HTML in model output is
+  shown as text, never rendered.
 - On a phone, Enter inserts a newline and the button sends. With a physical
   keyboard, Enter sends and Shift+Enter inserts a newline.
 
@@ -76,11 +78,17 @@ OpenRouter API (streaming, markdown, errors, retry, stop, reload persistence,
 HTML escaping). Not yet exercised against a live key: add one in the running
 app (never in the repo) and try a message.
 
+## Third-party libraries
+
+Vendored under `vendor/` so the app works offline and depends on no CDN:
+[marked](https://github.com/markedjs/marked) (MIT),
+[DOMPurify](https://github.com/cure53/DOMPurify) (Apache-2.0 / MPL-2.0),
+[KaTeX](https://katex.org) (MIT). Licences are alongside the files.
+
 ## Ideas for later
 
 - Export and import chats as a JSON file, for backup or moving devices.
 - Rename chats.
-- Fuller markdown (lists, headings, links, tables).
 - Cap or summarise old history so long threads don't grow the per-request cost
   without bound.
 - PNG icons (192/512 px) if Chrome declines the full install prompt with SVG only.

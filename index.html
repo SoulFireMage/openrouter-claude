@@ -7,6 +7,7 @@
 <title>OpenRouter Chat</title>
 <link rel="manifest" href="manifest.json">
 <link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="vendor/katex/katex.min.css">
 <style>
   :root {
     --bg: #0F1417;
@@ -121,7 +122,58 @@
     color: var(--text);
     margin-right: auto;
     border-bottom-left-radius: 3px;
+    white-space: normal;
   }
+
+  /* ---------- Rendered markdown ---------- */
+  .msg p { margin: 0 0 10px; }
+  .msg > p:last-of-type { margin-bottom: 0; }
+  .msg h1, .msg h2, .msg h3, .msg h4, .msg h5, .msg h6 {
+    margin: 12px 0 6px;
+    line-height: 1.3;
+    font-weight: 600;
+  }
+  .msg > :first-child { margin-top: 0; }
+  .msg h1 { font-size: 1.25em; }
+  .msg h2 { font-size: 1.15em; }
+  .msg h3 { font-size: 1.05em; }
+  .msg h4, .msg h5, .msg h6 { font-size: 1em; }
+  .msg ul, .msg ol { margin: 4px 0 10px; padding-left: 22px; }
+  .msg li { margin: 2px 0; }
+  .msg li > p { margin: 0; }
+  .msg blockquote {
+    margin: 6px 0 10px;
+    padding: 4px 12px;
+    border-left: 3px solid var(--accent);
+    color: var(--text-muted);
+  }
+  .msg blockquote p { margin: 0; }
+  .msg table {
+    border-collapse: collapse;
+    display: block;
+    max-width: 100%;
+    overflow-x: auto;
+    margin: 6px 0 10px;
+    font-size: 14px;
+  }
+  .msg th, .msg td {
+    border: 1px solid var(--border);
+    padding: 5px 8px;
+    text-align: left;
+    vertical-align: top;
+  }
+  .msg th { background: rgba(255, 255, 255, 0.05); }
+  .msg a { color: var(--accent); }
+  .msg.user a { color: var(--accent-text); text-decoration: underline; }
+  .msg hr { border: 0; border-top: 1px solid var(--border); margin: 10px 0; }
+  .msg img { max-width: 100%; border-radius: 6px; }
+  .msg .katex-display {
+    overflow-x: auto;
+    overflow-y: hidden;
+    padding: 4px 0;
+    margin: 6px 0 10px;
+  }
+  .msg .katex { font-size: 1.05em; }
 
   .msg.assistant.streaming::after {
     content: "▍";
@@ -584,6 +636,9 @@
   </div>
 </div>
 
+<script src="vendor/marked.umd.js"></script>
+<script src="vendor/purify.min.js"></script>
+<script src="vendor/katex/katex.min.js"></script>
 <script>
 (function () {
   "use strict";
@@ -742,40 +797,126 @@
   var storageStatus = document.getElementById("storage-status");
   var modelRefreshHint = document.getElementById("model-refresh-hint");
 
-  /* ---------------- Minimal, escape-first markdown ----------------
-     Supports fenced code blocks, inline code and **bold**. Everything is
-     HTML-escaped before any tag is introduced, so model output can never
-     inject markup. Plain newlines are preserved by the pre-wrap CSS. */
+  /* ---------------- Markdown + LaTeX rendering ----------------
+     Full pipeline: marked (GFM) with two custom tokenizers that lift maths
+     out before markdown can mangle underscores and asterisks, KaTeX to
+     typeset it, then DOMPurify over the whole result. Raw HTML in model
+     output is shown as text, not rendered, so the only markup that reaches
+     the page comes from markdown, KaTeX, or this file.
+     If a vendored library failed to load, an escape-first mini renderer
+     (code fences, inline code, bold) takes over so the app still works. */
   function escapeHtml(s) {
     return s.replace(/[&<>"']/g, function (c) {
       return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
     });
   }
 
-  function renderInline(escaped) {
+  function renderInlineBasic(escaped) {
     return escaped
       .replace(/`([^`\n]+)`/g, "<code>$1</code>")
       .replace(/\*\*([^*\n][^*]*?)\*\*/g, "<strong>$1</strong>");
   }
 
-  function renderMarkdown(text) {
+  function renderMarkdownBasic(text) {
     var parts = text.split("```");
     var html = "";
     for (var i = 0; i < parts.length; i++) {
       var part = parts[i];
       if (i % 2 === 1) {
-        // Code block. Drop a leading language tag line if present.
         var nl = part.indexOf("\n");
         if (nl !== -1 && /^[\w+#.-]*\s*$/.test(part.slice(0, nl))) part = part.slice(nl + 1);
         html += "<pre><code>" + escapeHtml(part.replace(/\n$/, "")) + "</code></pre>";
       } else {
-        // Trim the newline that hugs a fence so pre-wrap doesn't add blank lines.
         if (i > 0) part = part.replace(/^\n/, "");
         if (i < parts.length - 1) part = part.replace(/\n$/, "");
-        html += renderInline(escapeHtml(part));
+        html += renderInlineBasic(escapeHtml(part));
       }
     }
-    return html;
+    return '<div style="white-space:pre-wrap">' + html + "</div>";
+  }
+
+  var richRenderer = null;
+  var hasMarked = typeof window.marked !== "undefined" && typeof window.marked.use === "function";
+  var hasPurify = typeof window.DOMPurify !== "undefined" && typeof window.DOMPurify.sanitize === "function";
+  var hasKatex = typeof window.katex !== "undefined" && typeof window.katex.renderToString === "function";
+
+  if (hasMarked && hasPurify) {
+    var renderTex = function (tex, display) {
+      if (!hasKatex) return "<code>" + escapeHtml(tex) + "</code>";
+      try {
+        return window.katex.renderToString(tex, { displayMode: display, throwOnError: false, output: "htmlAndMathml" });
+      } catch (e) {
+        return "<code>" + escapeHtml(tex) + "</code>";
+      }
+    };
+
+    // $$...$$ or \[...\] standing alone as a block.
+    var mathBlock = {
+      name: "mathBlock",
+      level: "block",
+      start: function (src) {
+        var m = src.match(/(^|\n)(\$\$|\\\[)/);
+        return m ? m.index + m[1].length : undefined;
+      },
+      tokenizer: function (src) {
+        var m = /^\$\$([\s\S]+?)\$\$(?:[ \t]*(?:\n|$))/.exec(src) || /^\\\[([\s\S]+?)\\\](?:[ \t]*(?:\n|$))/.exec(src);
+        if (m) return { type: "mathBlock", raw: m[0], text: m[1].trim() };
+      },
+      renderer: function (token) { return renderTex(token.text, true); }
+    };
+
+    // Inline: \( ... \), $$ ... $$ within a paragraph, or $ ... $ using the
+    // pandoc rule: no space just inside the dollars, and the closing dollar
+    // must not be followed by a digit. "$5 and $10" stays money.
+    var mathInline = {
+      name: "mathInline",
+      level: "inline",
+      start: function (src) {
+        var m = src.match(/\$|\\\(|\\\[/);
+        return m ? m.index : undefined;
+      },
+      tokenizer: function (src) {
+        var m;
+        if ((m = /^\\\(([\s\S]+?)\\\)/.exec(src))) return { type: "mathInline", raw: m[0], text: m[1].trim(), display: false };
+        if ((m = /^\\\[([\s\S]+?)\\\]/.exec(src))) return { type: "mathInline", raw: m[0], text: m[1].trim(), display: true };
+        if ((m = /^\$\$([\s\S]+?)\$\$/.exec(src))) return { type: "mathInline", raw: m[0], text: m[1].trim(), display: true };
+        if ((m = /^\$(?!\s)((?:\\\$|[^$\n])*?[^\s$\\])\$(?!\d)/.exec(src))) return { type: "mathInline", raw: m[0], text: m[1], display: false };
+      },
+      renderer: function (token) { return renderTex(token.text, token.display); }
+    };
+
+    window.marked.use({
+      gfm: true,
+      breaks: true,
+      extensions: [mathBlock, mathInline],
+      renderer: {
+        // Show raw HTML from the model as text rather than interpreting it.
+        html: function (token) { return escapeHtml(typeof token === "string" ? token : (token.raw || token.text || "")); }
+      }
+    });
+
+    window.DOMPurify.addHook("afterSanitizeAttributes", function (node) {
+      if (node.tagName === "A") {
+        node.setAttribute("target", "_blank");
+        node.setAttribute("rel", "noopener noreferrer");
+      }
+    });
+
+    richRenderer = function (text) {
+      var html = window.marked.parse(text);
+      return window.DOMPurify.sanitize(html, { ADD_ATTR: ["target"] });
+    };
+  }
+
+  function renderMarkdown(text) {
+    if (richRenderer) {
+      try {
+        return richRenderer(text);
+      } catch (e) {
+        /* fall through to the basic renderer */
+      }
+    }
+    return renderMarkdownBasic(text);
   }
 
   /* ---------------- Rendering ---------------- */
@@ -1370,19 +1511,21 @@
     var usage = null;
     var servedModel = null;
     var servedProvider = null;
-    var renderQueued = false;
+    var renderTimer = null;
 
+    // Full markdown + KaTeX on every token is too heavy for long replies,
+    // so during streaming re-render at most every 100 ms.
     function queueRender() {
-      if (renderQueued) return;
-      renderQueued = true;
-      requestAnimationFrame(function () {
-        renderQueued = false;
+      if (renderTimer) return;
+      renderTimer = setTimeout(function () {
+        renderTimer = null;
         assistantEl.innerHTML = renderMarkdown(fullText);
         scrollToBottom(false);
-      });
+      }, 100);
     }
 
     function finish(entry) {
+      if (renderTimer) { clearTimeout(renderTimer); renderTimer = null; }
       if (currentChatId === sendChatId) {
         assistantEl.remove();
         history.push(entry);
