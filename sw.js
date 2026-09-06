@@ -1,5 +1,5 @@
 // Bump this when you change index.html/manifest/icon so clients pick up the new shell.
-const CACHE_NAME = "orc-shell-v1";
+const CACHE_NAME = "orc-shell-v2";
 
 const SHELL_FILES = [
   "./",
@@ -25,9 +25,8 @@ self.addEventListener("activate", function (event) {
           .filter(function (name) { return name !== CACHE_NAME; })
           .map(function (name) { return caches.delete(name); })
       );
-    })
+    }).then(function () { return self.clients.claim(); })
   );
-  self.clients.claim();
 });
 
 self.addEventListener("fetch", function (event) {
@@ -43,18 +42,25 @@ self.addEventListener("fetch", function (event) {
     return;
   }
 
+  // Stale-while-revalidate: serve the cached shell immediately, refresh it in the background.
   event.respondWith(
     caches.match(event.request).then(function (cached) {
       const network = fetch(event.request)
         .then(function (response) {
           if (response && response.ok) {
-            caches.open(CACHE_NAME).then(function (cache) {
-              cache.put(event.request, response.clone());
-            });
+            const copy = response.clone();
+            event.waitUntil(
+              caches.open(CACHE_NAME).then(function (cache) { return cache.put(event.request, copy); })
+            );
           }
           return response;
         })
-        .catch(function () { return cached; });
+        .catch(function () {
+          return cached || new Response("Offline and not cached.", {
+            status: 503,
+            headers: { "Content-Type": "text/plain" }
+          });
+        });
       return cached || network;
     })
   );
