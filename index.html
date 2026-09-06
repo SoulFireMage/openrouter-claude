@@ -51,18 +51,26 @@
     flex-shrink: 0;
   }
 
+  header .title-block {
+    flex: 1;
+    min-width: 0;
+    margin: 0 6px;
+  }
+
   header h1 {
     font-size: 15px;
     font-weight: 600;
     margin: 0;
     color: var(--text);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   header .model-name {
     font-size: 12px;
     color: var(--text-muted);
     margin-top: 2px;
-    max-width: 70vw;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -245,8 +253,9 @@
   #send-btn.stop .icon-send { display: none; }
   #send-btn.stop .icon-stop { display: block; }
 
-  /* ---------- Settings drawer ---------- */
-  #settings-overlay {
+  /* ---------- Drawers ---------- */
+  #settings-overlay,
+  #chats-overlay {
     position: fixed;
     inset: 0;
     background: rgba(0,0,0,0.5);
@@ -254,7 +263,93 @@
     z-index: 10;
   }
 
-  #settings-overlay.open { display: block; }
+  #settings-overlay.open,
+  #chats-overlay.open { display: block; }
+
+  #chats-panel {
+    position: fixed;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    width: min(320px, 85vw);
+    background: var(--surface-raised);
+    padding: max(20px, env(safe-area-inset-top)) 14px max(20px, env(safe-area-inset-bottom));
+    overflow-y: auto;
+    transform: translateX(-100%);
+    transition: transform 0.2s ease;
+    display: flex;
+    flex-direction: column;
+  }
+
+  #chats-overlay.open #chats-panel { transform: translateX(0); }
+
+  #chats-panel h2 {
+    font-size: 16px;
+    margin: 0 0 12px;
+  }
+
+  #new-chat-btn { margin-bottom: 14px; flex: none; }
+
+  #chat-list { display: flex; flex-direction: column; gap: 4px; }
+
+  .chat-row {
+    display: flex;
+    align-items: stretch;
+    border-radius: 8px;
+    background: var(--surface);
+    border: 1px solid transparent;
+  }
+
+  .chat-row.active { border-color: var(--accent); }
+
+  .chat-row .chat-open {
+    flex: 1;
+    min-width: 0;
+    background: none;
+    border: none;
+    color: var(--text);
+    text-align: left;
+    padding: 10px 12px;
+    font-family: inherit;
+    cursor: pointer;
+  }
+
+  .chat-row .chat-title {
+    display: block;
+    font-size: 14px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .chat-row .chat-sub {
+    display: block;
+    font-size: 11px;
+    color: var(--text-muted);
+    margin-top: 2px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .chat-row .chat-delete {
+    background: none;
+    border: none;
+    color: var(--text-muted);
+    padding: 0 12px;
+    font-size: 18px;
+    cursor: pointer;
+    flex: none;
+  }
+
+  .chat-row .chat-delete:active { color: var(--error); }
+
+  #chat-list-empty {
+    color: var(--text-muted);
+    font-size: 13px;
+    text-align: center;
+    padding: 20px 0;
+  }
 
   #settings-panel {
     position: fixed;
@@ -397,8 +492,11 @@
 <body>
 
 <header>
-  <div>
-    <h1>OpenRouter Chat</h1>
+  <button class="icon-btn" id="open-chats" aria-label="Chats">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
+  </button>
+  <div class="title-block">
+    <h1 id="chat-title">New chat</h1>
     <div class="model-name" id="current-model-label">No model selected</div>
   </div>
   <button class="icon-btn" id="open-settings" aria-label="Settings">
@@ -414,6 +512,14 @@
     <svg class="icon-send" viewBox="0 0 24 24" fill="currentColor"><path d="M2 21l21-9L2 3v7l15 2-15 2z"/></svg>
     <svg class="icon-stop" viewBox="0 0 24 24" fill="currentColor"><rect x="5" y="5" width="14" height="14" rx="2"/></svg>
   </button>
+</div>
+
+<div id="chats-overlay">
+  <div id="chats-panel">
+    <h2>Chats</h2>
+    <button class="btn primary" id="new-chat-btn">New chat</button>
+    <div id="chat-list"></div>
+  </div>
 </div>
 
 <div id="settings-overlay">
@@ -464,7 +570,7 @@
       <button class="btn primary" id="save-settings">Save</button>
     </div>
     <div class="btn-row">
-      <button class="btn danger" id="clear-chat">Clear conversation</button>
+      <button class="btn danger" id="clear-chat">Delete this chat</button>
     </div>
     <div class="btn-row">
       <button class="btn danger" id="forget-key">Forget API key</button>
@@ -498,12 +604,19 @@
     }
   }
 
+  function isQuotaError(e) {
+    return e && (e.name === "QuotaExceededError" || e.name === "NS_ERROR_DOM_QUOTA_REACHED" || e.code === 22 || e.code === 1014);
+  }
+
   function storageSet(key, value) {
     try {
       window.localStorage.setItem(key, value);
+      return true;
     } catch (e) {
+      if (isQuotaError(e) && !usingMemoryFallback) return false;
       usingMemoryFallback = true;
       memoryStore[key] = value;
+      return true;
     }
   }
 
@@ -519,24 +632,75 @@
     apiKey: "orc_api_key",
     model: "orc_model",
     systemPrompt: "orc_system_prompt",
-    history: "orc_history",
+    legacyHistory: "orc_history",
+    chats: "orc_chats",
+    currentChat: "orc_current_chat",
+    chatPrefix: "orc_chat_",
     filters: "orc_filters"
   };
 
-  /* ---------------- State ---------------- */
-  // history entries: { role: "user"|"assistant", content, model?, usage?, stopped? }
-  // Errors are deliberately NOT stored: they are transient UI, never API input.
-  var history = [];
-  try {
-    var parsed = JSON.parse(storageGet(KEYS.history) || "[]");
-    if (Array.isArray(parsed)) {
-      history = parsed.filter(function (m) {
-        return m && (m.role === "user" || m.role === "assistant") && typeof m.content === "string";
-      });
-    }
-  } catch (e) {
-    history = [];
+  /* ---------------- State ----------------
+     Chats are stored one per key (orc_chat_<id>) with a small index
+     (orc_chats) of { id, title, created, updated, model, count } so the
+     list can be shown without loading every message.
+     Message entries: { role: "user"|"assistant", content, model?, ... }.
+     Errors are deliberately NOT stored: they are transient UI, never API input. */
+  function cleanMessages(list) {
+    if (!Array.isArray(list)) return [];
+    return list.filter(function (m) {
+      return m && (m.role === "user" || m.role === "assistant") && typeof m.content === "string";
+    });
   }
+
+  function readJson(key, fallback) {
+    try {
+      var v = JSON.parse(storageGet(key) || "null");
+      return v === null ? fallback : v;
+    } catch (e) {
+      return fallback;
+    }
+  }
+
+  function newId() {
+    return Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+  }
+
+  function titleFrom(text) {
+    var line = text.replace(/\s+/g, " ").trim();
+    return line.length > 48 ? line.slice(0, 47) + "…" : (line || "Untitled chat");
+  }
+
+  function loadChat(id) {
+    return cleanMessages(readJson(KEYS.chatPrefix + id, []));
+  }
+
+  function saveChat(id, messages) {
+    return storageSet(KEYS.chatPrefix + id, JSON.stringify(messages));
+  }
+
+  var chats = readJson(KEYS.chats, []);
+  if (!Array.isArray(chats)) chats = [];
+  chats = chats.filter(function (c) { return c && typeof c.id === "string"; });
+
+  // One-time migration from the single-thread format.
+  var legacy = cleanMessages(readJson(KEYS.legacyHistory, []));
+  if (legacy.length) {
+    var legacyId = newId();
+    var firstUser = legacy.filter(function (m) { return m.role === "user"; })[0];
+    var legacyModel = legacy.filter(function (m) { return m.role === "assistant" && m.model; }).pop();
+    if (saveChat(legacyId, legacy)) {
+      chats.unshift({ id: legacyId, title: titleFrom(firstUser ? firstUser.content : "Imported chat"),
+        created: Date.now(), updated: Date.now(), model: legacyModel ? legacyModel.model : "", count: legacy.length });
+      storageSet(KEYS.chats, JSON.stringify(chats));
+      storageSet(KEYS.currentChat, legacyId);
+      storageRemove(KEYS.legacyHistory);
+    }
+  }
+
+  var currentChatId = storageGet(KEYS.currentChat) || null;
+  if (currentChatId && !chats.some(function (c) { return c.id === currentChatId; })) currentChatId = null;
+  var history = currentChatId ? loadChat(currentChatId) : [];
+  var storageFullWarned = false;
 
   var isStreaming = false;
   var currentAbort = null;
@@ -557,6 +721,11 @@
   var sendBtn = document.getElementById("send-btn");
   var settingsOverlay = document.getElementById("settings-overlay");
   var openSettingsBtn = document.getElementById("open-settings");
+  var chatsOverlay = document.getElementById("chats-overlay");
+  var openChatsBtn = document.getElementById("open-chats");
+  var newChatBtn = document.getElementById("new-chat-btn");
+  var chatListEl = document.getElementById("chat-list");
+  var chatTitleEl = document.getElementById("chat-title");
   var apiKeyInput = document.getElementById("api-key");
   var modelFilter = document.getElementById("model-filter");
   var filterProvider = document.getElementById("filter-provider");
@@ -687,7 +856,9 @@
       var empty = document.createElement("div");
       empty.id = "empty-state";
       empty.className = "transient";
-      empty.innerHTML = "<strong>Nothing sent yet</strong>Open settings, add your OpenRouter key and pick a model, then start typing.";
+      empty.innerHTML = storageGet(KEYS.apiKey) && storageGet(KEYS.model)
+        ? "<strong>New chat</strong>Fresh context. Nothing from other chats is sent with your messages."
+        : "<strong>Nothing sent yet</strong>Open settings, add your OpenRouter key and pick a model, then start typing.";
       messagesEl.appendChild(empty);
       return;
     }
@@ -699,8 +870,141 @@
   }
 
   function persistHistory() {
-    storageSet(KEYS.history, JSON.stringify(history));
+    if (!currentChatId) {
+      if (history.length === 0) return;
+      currentChatId = newId();
+      var first = history.filter(function (m) { return m.role === "user"; })[0];
+      chats.unshift({ id: currentChatId, title: titleFrom(first ? first.content : ""), created: Date.now(), updated: Date.now(), model: "", count: 0 });
+      storageSet(KEYS.currentChat, currentChatId);
+      updateChatTitle();
+    }
+    var ok = saveChat(currentChatId, history);
+    var entry = chatMeta(currentChatId);
+    if (entry) {
+      entry.updated = Date.now();
+      entry.count = history.length;
+      var lastAssistant = history.filter(function (m) { return m.role === "assistant" && m.model; }).pop();
+      entry.model = lastAssistant ? lastAssistant.model : (storageGet(KEYS.model) || entry.model || "");
+      chats.sort(function (a, b) { return b.updated - a.updated; });
+    }
+    ok = storageSet(KEYS.chats, JSON.stringify(chats)) && ok;
+    if (!ok && !storageFullWarned) {
+      storageFullWarned = true;
+      showError("This device's storage is full, so this chat isn't being saved. Delete some old chats to make room.", false);
+    }
   }
+
+  /* ---------------- Chats ---------------- */
+  function chatMeta(id) {
+    for (var i = 0; i < chats.length; i++) if (chats[i].id === id) return chats[i];
+    return null;
+  }
+
+  function updateChatTitle() {
+    var meta = currentChatId && chatMeta(currentChatId);
+    chatTitleEl.textContent = meta ? meta.title : "New chat";
+  }
+
+  function formatWhen(ts) {
+    if (!ts) return "";
+    var d = new Date(ts);
+    var now = new Date();
+    var sameDay = d.toDateString() === now.toDateString();
+    if (sameDay) return d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+    return d.toLocaleDateString(undefined, { day: "numeric", month: "short" });
+  }
+
+  function renderChatList() {
+    chatListEl.innerHTML = "";
+    if (chats.length === 0) {
+      var none = document.createElement("div");
+      none.id = "chat-list-empty";
+      none.textContent = "No saved chats yet.";
+      chatListEl.appendChild(none);
+      return;
+    }
+    chats.forEach(function (c) {
+      var row = document.createElement("div");
+      row.className = "chat-row" + (c.id === currentChatId ? " active" : "");
+
+      var open = document.createElement("button");
+      open.type = "button";
+      open.className = "chat-open";
+      var t = document.createElement("span");
+      t.className = "chat-title";
+      t.textContent = c.title || "Untitled chat";
+      var sub = document.createElement("span");
+      sub.className = "chat-sub";
+      var subBits = [];
+      if (c.model) subBits.push(c.model);
+      if (c.count) subBits.push(c.count + " messages");
+      var when = formatWhen(c.updated);
+      if (when) subBits.push(when);
+      sub.textContent = subBits.join(" · ");
+      open.appendChild(t);
+      open.appendChild(sub);
+      open.addEventListener("click", function () { switchChat(c.id); });
+
+      var del = document.createElement("button");
+      del.type = "button";
+      del.className = "chat-delete";
+      del.setAttribute("aria-label", "Delete chat");
+      del.textContent = "×";
+      del.addEventListener("click", function () { deleteChat(c.id); });
+
+      row.appendChild(open);
+      row.appendChild(del);
+      chatListEl.appendChild(row);
+    });
+  }
+
+  function openChats() {
+    renderChatList();
+    chatsOverlay.classList.add("open");
+  }
+
+  function closeChats() {
+    chatsOverlay.classList.remove("open");
+  }
+
+  function switchChat(id) {
+    if (id === currentChatId) { closeChats(); return; }
+    if (currentAbort) currentAbort.abort();
+    currentChatId = id;
+    history = loadChat(id);
+    storageSet(KEYS.currentChat, id);
+    updateChatTitle();
+    renderHistory();
+    closeChats();
+  }
+
+  function startNewChat() {
+    if (currentAbort) currentAbort.abort();
+    currentChatId = null;
+    history = [];
+    storageRemove(KEYS.currentChat);
+    updateChatTitle();
+    renderHistory();
+    closeChats();
+    closeSettings();
+  }
+
+  function deleteChat(id) {
+    var meta = chatMeta(id);
+    if (!meta) return;
+    if (!confirm("Delete \"" + meta.title + "\"? This can't be undone.")) return;
+    storageRemove(KEYS.chatPrefix + id);
+    chats = chats.filter(function (c) { return c.id !== id; });
+    storageSet(KEYS.chats, JSON.stringify(chats));
+    if (id === currentChatId) startNewChat();
+    renderChatList();
+  }
+
+  openChatsBtn.addEventListener("click", openChats);
+  newChatBtn.addEventListener("click", startNewChat);
+  chatsOverlay.addEventListener("click", function (e) {
+    if (e.target === chatsOverlay) closeChats();
+  });
 
   /* ---------------- Settings ---------------- */
   function updateModelLabel(modelId) {
@@ -969,11 +1273,11 @@
   });
 
   clearChatBtn.addEventListener("click", function () {
-    if (!confirm("Clear the whole conversation? This can't be undone.")) return;
-    if (currentAbort) currentAbort.abort();
-    history = [];
-    persistHistory();
-    renderHistory();
+    if (currentChatId) {
+      deleteChat(currentChatId);
+    } else {
+      startNewChat();
+    }
     closeSettings();
   });
 
@@ -1053,6 +1357,7 @@
     }
 
     var apiMessages = buildApiMessages();
+    var sendChatId = currentChatId;   // the chat this reply belongs to, even if the user switches away
 
     setStreamingUI(true);
     currentAbort = new AbortController();
@@ -1078,10 +1383,20 @@
     }
 
     function finish(entry) {
-      assistantEl.remove();
-      history.push(entry);
-      persistHistory();
-      appendMessageEl(entry);
+      if (currentChatId === sendChatId) {
+        assistantEl.remove();
+        history.push(entry);
+        persistHistory();
+        appendMessageEl(entry);
+      } else {
+        // User moved to another chat mid-reply: file the reply where it belongs.
+        var other = loadChat(sendChatId);
+        other.push(entry);
+        saveChat(sendChatId, other);
+        var meta = chatMeta(sendChatId);
+        if (meta) { meta.updated = Date.now(); meta.count = other.length; meta.model = entry.model || meta.model; }
+        storageSet(KEYS.chats, JSON.stringify(chats));
+      }
     }
 
     try {
@@ -1150,11 +1465,11 @@
       if (err.name === "AbortError") {
         if (fullText) {
           finish({ role: "assistant", content: fullText, model: servedModel || model, requested: model, provider: servedProvider, usage: usage, stopped: true });
-        } else {
+        } else if (currentChatId === sendChatId) {
           assistantEl.remove();
           showError("Stopped before any reply arrived.", true);
         }
-      } else {
+      } else if (currentChatId === sendChatId) {
         assistantEl.remove();
         showError("Request failed: " + err.message, true);
       }
@@ -1190,6 +1505,7 @@
 
   /* ---------------- Init ---------------- */
   updateModelLabel(chosenModel);
+  updateChatTitle();
   renderHistory();
   updateComposerEnabled();
   updateStorageStatus();
