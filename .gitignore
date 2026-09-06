@@ -1,0 +1,16 @@
+# Never commit secrets. The OpenRouter key belongs in the app's settings panel only.
+.env
+.env.*
+*.key
+*.pem
+secrets*
+config.local.*
+
+# Editor / OS noise
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Local tooling
+node_modules/

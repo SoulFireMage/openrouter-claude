@@ -1,0 +1,19 @@
+{
+  "name": "OpenRouter Chat",
+  "short_name": "OR Chat",
+  "description": "A minimal personal chat client for OpenRouter, running entirely in the browser.",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#0F1417",
+  "theme_color": "#0F1417",
+  "orientation": "portrait",
+  "icons": [
+    {
+      "src": "icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

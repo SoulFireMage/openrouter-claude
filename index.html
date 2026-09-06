@@ -1,0 +1,736 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0F1417">
+<title>OpenRouter Chat</title>
+<link rel="manifest" href="manifest.json">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<style>
+  :root {
+    --bg: #0F1417;
+    --surface: #1B2226;
+    --surface-raised: #232C31;
+    --border: #2D383E;
+    --text: #EDEFF0;
+    --text-muted: #8B98A0;
+    --accent: #4FA8D8;
+    --accent-text: #05262F;
+    --error: #E2725B;
+    --radius: 10px;
+  }
+
+  * { box-sizing: border-box; }
+
+  html, body {
+    height: 100%;
+    margin: 0;
+  }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    font-size: 16px;
+    line-height: 1.45;
+    display: flex;
+    flex-direction: column;
+    height: 100dvh;
+    overflow: hidden;
+  }
+
+  /* ---------- Header ---------- */
+  header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: env(safe-area-inset-top, 0) 14px 10px;
+    padding-top: max(12px, env(safe-area-inset-top));
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+  }
+
+  header h1 {
+    font-size: 15px;
+    font-weight: 600;
+    margin: 0;
+    color: var(--text);
+  }
+
+  header .model-name {
+    font-size: 12px;
+    color: var(--text-muted);
+    margin-top: 2px;
+  }
+
+  .icon-btn {
+    background: none;
+    border: none;
+    color: var(--text-muted);
+    padding: 8px;
+    border-radius: 8px;
+    cursor: pointer;
+    line-height: 0;
+  }
+
+  .icon-btn:active { background: var(--surface); }
+
+  .icon-btn svg { width: 20px; height: 20px; display: block; }
+
+  /* ---------- Message list ---------- */
+  #messages {
+    flex: 1;
+    overflow-y: auto;
+    padding: 16px 14px 8px;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .msg {
+    max-width: 88%;
+    margin-bottom: 12px;
+    padding: 10px 13px;
+    border-radius: var(--radius);
+    white-space: pre-wrap;
+    word-wrap: break-word;
+    font-size: 15px;
+  }
+
+  .msg.user {
+    background: var(--accent);
+    color: var(--accent-text);
+    margin-left: auto;
+    border-bottom-right-radius: 3px;
+  }
+
+  .msg.assistant {
+    background: var(--surface);
+    color: var(--text);
+    margin-right: auto;
+    border-bottom-left-radius: 3px;
+  }
+
+  .msg.system-note {
+    background: none;
+    color: var(--text-muted);
+    font-size: 13px;
+    text-align: center;
+    max-width: 100%;
+    margin: 8px auto;
+  }
+
+  .msg.error {
+    background: rgba(226, 114, 91, 0.12);
+    color: var(--error);
+    border: 1px solid rgba(226, 114, 91, 0.3);
+    margin-right: auto;
+  }
+
+  .msg .meta {
+    display: block;
+    font-size: 11px;
+    opacity: 0.6;
+    margin-top: 6px;
+  }
+
+  #empty-state {
+    color: var(--text-muted);
+    text-align: center;
+    padding: 40px 24px;
+    font-size: 14px;
+  }
+
+  #empty-state strong {
+    display: block;
+    color: var(--text);
+    font-size: 16px;
+    margin-bottom: 6px;
+  }
+
+  /* ---------- Input bar ---------- */
+  #input-bar {
+    flex-shrink: 0;
+    display: flex;
+    align-items: flex-end;
+    gap: 8px;
+    padding: 10px 12px;
+    padding-bottom: max(10px, env(safe-area-inset-bottom));
+    border-top: 1px solid var(--border);
+    background: var(--bg);
+  }
+
+  #composer {
+    flex: 1;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 20px;
+    color: var(--text);
+    padding: 10px 16px;
+    font-size: 15px;
+    font-family: inherit;
+    resize: none;
+    max-height: 120px;
+    outline: none;
+  }
+
+  #composer:focus { border-color: var(--accent); }
+
+  #send-btn {
+    background: var(--accent);
+    color: var(--accent-text);
+    border: none;
+    width: 40px;
+    height: 40px;
+    border-radius: 50%;
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+  }
+
+  #send-btn:disabled {
+    opacity: 0.4;
+  }
+
+  #send-btn svg { width: 18px; height: 18px; }
+
+  /* ---------- Settings drawer ---------- */
+  #settings-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.5);
+    display: none;
+    z-index: 10;
+  }
+
+  #settings-overlay.open { display: block; }
+
+  #settings-panel {
+    position: fixed;
+    right: 0;
+    top: 0;
+    bottom: 0;
+    width: min(340px, 88vw);
+    background: var(--surface-raised);
+    padding: max(20px, env(safe-area-inset-top)) 18px 20px;
+    overflow-y: auto;
+    transform: translateX(100%);
+    transition: transform 0.2s ease;
+  }
+
+  #settings-overlay.open #settings-panel {
+    transform: translateX(0);
+  }
+
+  #settings-panel h2 {
+    font-size: 16px;
+    margin: 0 0 4px;
+  }
+
+  #settings-panel .field {
+    margin-top: 18px;
+  }
+
+  #settings-panel label {
+    display: block;
+    font-size: 12px;
+    color: var(--text-muted);
+    margin-bottom: 6px;
+  }
+
+  #settings-panel input,
+  #settings-panel select {
+    width: 100%;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 10px 12px;
+    border-radius: 8px;
+    font-size: 14px;
+    font-family: inherit;
+  }
+
+  #settings-panel .hint {
+    font-size: 12px;
+    color: var(--text-muted);
+    margin-top: 6px;
+    line-height: 1.4;
+  }
+
+  #settings-panel .hint a { color: var(--accent); }
+
+  #settings-panel .warning {
+    margin-top: 22px;
+    padding: 12px;
+    border-radius: 8px;
+    background: rgba(226, 114, 91, 0.1);
+    border: 1px solid rgba(226, 114, 91, 0.25);
+    font-size: 12px;
+    color: var(--text);
+    line-height: 1.5;
+  }
+
+  #settings-panel .warning strong { color: var(--error); }
+
+  .btn-row {
+    display: flex;
+    gap: 10px;
+    margin-top: 22px;
+  }
+
+  .btn {
+    flex: 1;
+    padding: 10px;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    background: var(--surface);
+    color: var(--text);
+    font-size: 14px;
+    cursor: pointer;
+  }
+
+  .btn.primary {
+    background: var(--accent);
+    color: var(--accent-text);
+    border: none;
+  }
+
+  .btn.danger {
+    color: var(--error);
+    border-color: rgba(226, 114, 91, 0.3);
+  }
+
+  .storage-note {
+    font-size: 11px;
+    color: var(--text-muted);
+    margin-top: 20px;
+    padding-top: 14px;
+    border-top: 1px solid var(--border);
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <div>
+    <h1>OpenRouter Chat</h1>
+    <div class="model-name" id="current-model-label">No model selected</div>
+  </div>
+  <button class="icon-btn" id="open-settings" aria-label="Settings">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+  </button>
+</header>
+
+<div id="messages">
+  <div id="empty-state">
+    <strong>Nothing sent yet</strong>
+    Open settings, add your OpenRouter key and pick a model, then start typing.
+  </div>
+</div>
+
+<div id="input-bar">
+  <textarea id="composer" rows="1" placeholder="Message…" disabled></textarea>
+  <button id="send-btn" disabled aria-label="Send">
+    <svg viewBox="0 0 24 24" fill="currentColor"><path d="M2 21l21-9L2 3v7l15 2-15 2z"/></svg>
+  </button>
+</div>
+
+<div id="settings-overlay">
+  <div id="settings-panel">
+    <h2>Settings</h2>
+
+    <div class="field">
+      <label for="api-key">OpenRouter API key</label>
+      <input type="password" id="api-key" placeholder="sk-or-v1-…" autocomplete="off" autocapitalize="off" spellcheck="false">
+      <div class="hint">Stored only on this device. Get a key at <a href="https://openrouter.ai/settings/keys" target="_blank" rel="noopener">openrouter.ai/settings/keys</a>.</div>
+    </div>
+
+    <div class="field">
+      <label for="model-select">Model</label>
+      <select id="model-select">
+        <option value="">Loading models…</option>
+      </select>
+      <div class="hint" id="model-refresh-hint">Models load automatically once a key is saved.</div>
+    </div>
+
+    <div class="field">
+      <label for="system-prompt">System prompt (optional)</label>
+      <input type="text" id="system-prompt" placeholder="e.g. Be concise.">
+    </div>
+
+    <div class="btn-row">
+      <button class="btn primary" id="save-settings">Save</button>
+    </div>
+    <div class="btn-row">
+      <button class="btn danger" id="clear-chat">Clear conversation</button>
+    </div>
+    <div class="btn-row">
+      <button class="btn danger" id="forget-key">Forget API key</button>
+    </div>
+
+    <div class="warning">
+      <strong>This repo is public.</strong> Never paste your API key into any file that gets committed to git — only type it here, into the field above. This app talks to OpenRouter directly from your browser; the key never passes through any other server.
+    </div>
+
+    <div class="storage-note" id="storage-status">Checking storage…</div>
+  </div>
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  /* ---------------- Storage: localStorage with in-memory fallback ---------------- */
+  const memoryStore = {};
+  let usingMemoryFallback = false;
+
+  function storageGet(key) {
+    try {
+      const v = window.localStorage.getItem(key);
+      return v;
+    } catch (e) {
+      usingMemoryFallback = true;
+      return Object.prototype.hasOwnProperty.call(memoryStore, key) ? memoryStore[key] : null;
+    }
+  }
+
+  function storageSet(key, value) {
+    try {
+      window.localStorage.setItem(key, value);
+    } catch (e) {
+      usingMemoryFallback = true;
+      memoryStore[key] = value;
+    }
+  }
+
+  function storageRemove(key) {
+    try {
+      window.localStorage.removeItem(key);
+    } catch (e) {
+      delete memoryStore[key];
+    }
+  }
+
+  const KEYS = {
+    apiKey: "orc_api_key",
+    model: "orc_model",
+    systemPrompt: "orc_system_prompt",
+    history: "orc_history"
+  };
+
+  /* ---------------- State ---------------- */
+  let history = [];
+  try {
+    history = JSON.parse(storageGet(KEYS.history) || "[]");
+  } catch (e) {
+    history = [];
+  }
+
+  let isStreaming = false;
+
+  /* ---------------- DOM refs ---------------- */
+  const messagesEl = document.getElementById("messages");
+  const composerEl = document.getElementById("composer");
+  const sendBtn = document.getElementById("send-btn");
+  const settingsOverlay = document.getElementById("settings-overlay");
+  const openSettingsBtn = document.getElementById("open-settings");
+  const apiKeyInput = document.getElementById("api-key");
+  const modelSelect = document.getElementById("model-select");
+  const systemPromptInput = document.getElementById("system-prompt");
+  const saveSettingsBtn = document.getElementById("save-settings");
+  const clearChatBtn = document.getElementById("clear-chat");
+  const forgetKeyBtn = document.getElementById("forget-key");
+  const currentModelLabel = document.getElementById("current-model-label");
+  const storageStatus = document.getElementById("storage-status");
+  const modelRefreshHint = document.getElementById("model-refresh-hint");
+
+  /* ---------------- Rendering ---------------- */
+  function renderHistory() {
+    messagesEl.innerHTML = "";
+    if (history.length === 0) {
+      const empty = document.createElement("div");
+      empty.id = "empty-state";
+      empty.innerHTML = "<strong>Nothing sent yet</strong>Open settings, add your OpenRouter key and pick a model, then start typing.";
+      messagesEl.appendChild(empty);
+      return;
+    }
+    history.forEach(function (m) {
+      appendMessageEl(m.role, m.content);
+    });
+    scrollToBottom();
+  }
+
+  function appendMessageEl(role, content) {
+    const el = document.createElement("div");
+    el.className = "msg " + (role === "user" ? "user" : role === "error" ? "error" : "assistant");
+    el.textContent = content;
+    messagesEl.appendChild(el);
+    return el;
+  }
+
+  function scrollToBottom() {
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+  }
+
+  function persistHistory() {
+    storageSet(KEYS.history, JSON.stringify(history));
+  }
+
+  /* ---------------- Settings ---------------- */
+  function loadSettingsIntoForm() {
+    apiKeyInput.value = storageGet(KEYS.apiKey) || "";
+    systemPromptInput.value = storageGet(KEYS.systemPrompt) || "";
+    const savedModel = storageGet(KEYS.model) || "";
+    if (savedModel) {
+      updateModelLabel(savedModel);
+    }
+  }
+
+  function updateModelLabel(modelId) {
+    currentModelLabel.textContent = modelId || "No model selected";
+  }
+
+  function updateComposerEnabled() {
+    const hasKey = !!storageGet(KEYS.apiKey);
+    const hasModel = !!storageGet(KEYS.model);
+    const ready = hasKey && hasModel;
+    composerEl.disabled = !ready;
+    sendBtn.disabled = !ready || isStreaming;
+    composerEl.placeholder = ready ? "Message…" : "Add a key and model in settings first";
+  }
+
+  async function fetchModels(key) {
+    modelRefreshHint.textContent = "Loading models…";
+    try {
+      const headers = {};
+      if (key) headers["Authorization"] = "Bearer " + key;
+      const res = await fetch("https://openrouter.ai/api/v1/models", { headers: headers });
+      if (!res.ok) throw new Error("HTTP " + res.status);
+      const data = await res.json();
+      const models = (data && data.data) || [];
+      modelSelect.innerHTML = "";
+      if (models.length === 0) {
+        modelSelect.innerHTML = "<option value=''>No models returned</option>";
+        modelRefreshHint.textContent = "OpenRouter returned no models — check your key.";
+        return;
+      }
+      models
+        .slice()
+        .sort(function (a, b) { return a.id.localeCompare(b.id); })
+        .forEach(function (m) {
+          const opt = document.createElement("option");
+          opt.value = m.id;
+          opt.textContent = m.id;
+          modelSelect.appendChild(opt);
+        });
+      const saved = storageGet(KEYS.model);
+      if (saved && models.some(function (m) { return m.id === saved; })) {
+        modelSelect.value = saved;
+      }
+      modelRefreshHint.textContent = models.length + " models loaded.";
+    } catch (err) {
+      modelSelect.innerHTML = "<option value=''>Couldn't load models</option>";
+      modelRefreshHint.textContent = "Couldn't reach OpenRouter (" + err.message + "). Check your connection or key.";
+    }
+  }
+
+  function openSettings() {
+    loadSettingsIntoForm();
+    settingsOverlay.classList.add("open");
+    const key = storageGet(KEYS.apiKey);
+    if (key && modelSelect.options.length <= 1) {
+      fetchModels(key);
+    }
+  }
+
+  function closeSettings() {
+    settingsOverlay.classList.remove("open");
+  }
+
+  openSettingsBtn.addEventListener("click", openSettings);
+  settingsOverlay.addEventListener("click", function (e) {
+    if (e.target === settingsOverlay) closeSettings();
+  });
+
+  apiKeyInput.addEventListener("change", function () {
+    const key = apiKeyInput.value.trim();
+    if (key) fetchModels(key);
+  });
+
+  saveSettingsBtn.addEventListener("click", function () {
+    const key = apiKeyInput.value.trim();
+    const model = modelSelect.value;
+    const sys = systemPromptInput.value.trim();
+
+    if (key) storageSet(KEYS.apiKey, key); else storageRemove(KEYS.apiKey);
+    if (model) storageSet(KEYS.model, model); else storageRemove(KEYS.model);
+    if (sys) storageSet(KEYS.systemPrompt, sys); else storageRemove(KEYS.systemPrompt);
+
+    updateModelLabel(model);
+    updateComposerEnabled();
+    closeSettings();
+  });
+
+  clearChatBtn.addEventListener("click", function () {
+    if (!confirm("Clear the whole conversation? This can't be undone.")) return;
+    history = [];
+    persistHistory();
+    renderHistory();
+    closeSettings();
+  });
+
+  forgetKeyBtn.addEventListener("click", function () {
+    if (!confirm("Remove the saved API key from this device?")) return;
+    storageRemove(KEYS.apiKey);
+    apiKeyInput.value = "";
+    updateComposerEnabled();
+  });
+
+  /* ---------------- Sending / streaming ---------------- */
+  composerEl.addEventListener("input", function () {
+    composerEl.style.height = "auto";
+    composerEl.style.height = Math.min(composerEl.scrollHeight, 120) + "px";
+  });
+
+  composerEl.addEventListener("keydown", function (e) {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      sendMessage();
+    }
+  });
+
+  sendBtn.addEventListener("click", sendMessage);
+
+  async function sendMessage() {
+    const text = composerEl.value.trim();
+    if (!text || isStreaming) return;
+
+    const key = storageGet(KEYS.apiKey);
+    const model = storageGet(KEYS.model);
+    if (!key || !model) {
+      updateComposerEnabled();
+      return;
+    }
+
+    document.getElementById("empty-state") && (messagesEl.innerHTML = "");
+
+    history.push({ role: "user", content: text });
+    persistHistory();
+    appendMessageEl("user", text);
+    composerEl.value = "";
+    composerEl.style.height = "auto";
+    scrollToBottom();
+
+    const sys = storageGet(KEYS.systemPrompt);
+    const apiMessages = [];
+    if (sys) apiMessages.push({ role: "system", content: sys });
+    history.forEach(function (m) { apiMessages.push({ role: m.role, content: m.content }); });
+
+    isStreaming = true;
+    sendBtn.disabled = true;
+    const assistantEl = appendMessageEl("assistant", "");
+    scrollToBottom();
+
+    let fullText = "";
+
+    try {
+      const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": "Bearer " + key
+        },
+        body: JSON.stringify({
+          model: model,
+          messages: apiMessages,
+          stream: true
+        })
+      });
+
+      if (!res.ok || !res.body) {
+        const errText = await safeReadError(res);
+        throw new Error("HTTP " + res.status + (errText ? ": " + errText : ""));
+      }
+
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+
+      while (true) {
+        const chunk = await reader.read();
+        if (chunk.done) break;
+        buffer += decoder.decode(chunk.value, { stream: true });
+
+        const lines = buffer.split("\n");
+        buffer = lines.pop();
+
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed.startsWith("data:")) continue;
+          const payload = trimmed.slice(5).trim();
+          if (payload === "[DONE]") continue;
+          try {
+            const json = JSON.parse(payload);
+            const delta = json.choices && json.choices[0] && json.choices[0].delta;
+            const piece = delta && delta.content;
+            if (piece) {
+              fullText += piece;
+              assistantEl.textContent = fullText;
+              scrollToBottom();
+            }
+          } catch (parseErr) {
+            /* ignore malformed SSE fragments */
+          }
+        }
+      }
+
+      if (!fullText) fullText = "(empty response)";
+      history.push({ role: "assistant", content: fullText });
+      persistHistory();
+    } catch (err) {
+      assistantEl.remove();
+      history.push({ role: "error", content: "Request failed: " + err.message });
+      appendMessageEl("error", "Request failed: " + err.message);
+      persistHistory();
+    } finally {
+      isStreaming = false;
+      updateComposerEnabled();
+      scrollToBottom();
+    }
+  }
+
+  async function safeReadError(res) {
+    try {
+      const j = await res.json();
+      return (j && j.error && j.error.message) || "";
+    } catch (e) {
+      return "";
+    }
+  }
+
+  /* ---------------- Storage status banner ---------------- */
+  function updateStorageStatus() {
+    storageStatus.textContent = usingMemoryFallback
+      ? "Note: persistent storage isn't available here — settings and history will clear when this page closes."
+      : "Settings and history are saved on this device only.";
+  }
+
+  /* ---------------- Service worker ---------------- */
+  if ("serviceWorker" in navigator) {
+    window.addEventListener("load", function () {
+      navigator.serviceWorker.register("sw.js").catch(function () { /* offline shell is optional */ });
+    });
+  }
+
+  /* ---------------- Init ---------------- */
+  loadSettingsIntoForm();
+  renderHistory();
+  updateComposerEnabled();
+  updateStorageStatus();
+  const savedKeyOnLoad = storageGet(KEYS.apiKey);
+  if (savedKeyOnLoad) fetchModels(savedKeyOnLoad);
+})();
+</script>
+</body>
+</html>
