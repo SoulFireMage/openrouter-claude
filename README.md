@@ -19,6 +19,10 @@ just static files.
 
 ## Features
 
+- Multiple chats, each a separate context, stored on the device. The list
+  drawer (top left) starts a new chat, switches between chats, or deletes
+  one. A new chat is only saved once you send something. Switching chats
+  stops any reply still streaming; the partial reply is kept in its own chat.
 - Streaming replies with a **Stop** button (partial text is kept).
 - **Retry** on any failed request, including one left dangling by a reload.
 - Model picker with provider, capability (vision, reasoning, tools) and budget
@@ -74,7 +78,8 @@ app (never in the repo) and try a message.
 
 ## Ideas for later
 
-- Per-conversation history instead of one running thread.
+- Export and import chats as a JSON file, for backup or moving devices.
+- Rename chats.
 - Fuller markdown (lists, headings, links, tables).
 - Cap or summarise old history so long threads don't grow the per-request cost
   without bound.
