@@ -1,5 +1,5 @@
 // Bump this when you change index.html/manifest/icon so clients pick up the new shell.
-const CACHE_NAME = "orc-shell-v9";
+const CACHE_NAME = "orc-shell-v10";
 
 const SHELL_FILES = [
   "./",
