@@ -488,6 +488,49 @@
 
   #settings-panel .hint a { color: var(--accent); }
 
+  .profile-row {
+    display: flex;
+    gap: 6px;
+    margin-top: 6px;
+  }
+
+  .profile-row .btn {
+    padding: 8px 6px;
+    font-size: 13px;
+  }
+
+  #profile-editor {
+    margin-top: 10px;
+    padding: 10px;
+    border-radius: 8px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+  }
+
+  #profile-editor .checks {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px 14px;
+    margin-top: 8px;
+  }
+
+  #profile-editor .checks label {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    margin: 0;
+    font-size: 13px;
+    color: var(--text);
+  }
+
+  #profile-editor .checks input[type="checkbox"] {
+    width: auto;
+    margin: 0;
+    padding: 0;
+  }
+
+  #profile-editor .btn-row { margin-top: 10px; }
+
   #settings-panel .warning {
     margin-top: 22px;
     padding: 12px;
@@ -582,6 +625,34 @@
       <label for="api-key">OpenRouter API key</label>
       <input type="password" id="api-key" placeholder="sk-or-v1-…" autocomplete="off" autocapitalize="off" spellcheck="false">
       <div class="hint">Stored only on this device. Get a key at <a href="https://openrouter.ai/settings/keys" target="_blank" rel="noopener">openrouter.ai/settings/keys</a>.</div>
+    </div>
+
+    <div class="field">
+      <label for="profile-select">Profile</label>
+      <select id="profile-select">
+        <option value="">No profile</option>
+      </select>
+      <div class="hint" id="profile-hint">A profile remembers a model, system prompt and filters. Picking one applies it straight away.</div>
+      <div class="profile-row">
+        <button type="button" class="btn" id="profile-new">Save as…</button>
+        <button type="button" class="btn" id="profile-update" hidden>Update</button>
+        <button type="button" class="btn" id="profile-default" hidden>Set default</button>
+        <button type="button" class="btn danger" id="profile-delete" hidden>Delete</button>
+      </div>
+      <div id="profile-editor" hidden>
+        <label for="profile-name">Profile name</label>
+        <input type="text" id="profile-name" autocomplete="off" maxlength="40">
+        <div class="checks">
+          <label><input type="checkbox" id="profile-inc-model" checked> Model</label>
+          <label><input type="checkbox" id="profile-inc-prompt" checked> System prompt</label>
+          <label><input type="checkbox" id="profile-inc-filters" checked> Filters</label>
+        </div>
+        <div class="hint">Untick a field and applying this profile leaves that setting as it is. Untick Model for a prompt-only persona.</div>
+        <div class="btn-row">
+          <button type="button" class="btn primary" id="profile-save">Save profile</button>
+          <button type="button" class="btn" id="profile-cancel">Cancel</button>
+        </div>
+      </div>
     </div>
 
     <div class="field">
@@ -691,7 +762,9 @@
     chats: "orc_chats",
     currentChat: "orc_current_chat",
     chatPrefix: "orc_chat_",
-    filters: "orc_filters"
+    filters: "orc_filters",
+    profiles: "orc_profiles",
+    activeProfile: "orc_active_profile"
   };
 
   /* ---------------- State ----------------
@@ -781,6 +854,19 @@
   var newChatBtn = document.getElementById("new-chat-btn");
   var chatListEl = document.getElementById("chat-list");
   var chatTitleEl = document.getElementById("chat-title");
+  var profileSelect = document.getElementById("profile-select");
+  var profileHint = document.getElementById("profile-hint");
+  var profileNewBtn = document.getElementById("profile-new");
+  var profileUpdateBtn = document.getElementById("profile-update");
+  var profileDefaultBtn = document.getElementById("profile-default");
+  var profileDeleteBtn = document.getElementById("profile-delete");
+  var profileEditor = document.getElementById("profile-editor");
+  var profileNameInput = document.getElementById("profile-name");
+  var profileIncModel = document.getElementById("profile-inc-model");
+  var profileIncPrompt = document.getElementById("profile-inc-prompt");
+  var profileIncFilters = document.getElementById("profile-inc-filters");
+  var profileSaveBtn = document.getElementById("profile-save");
+  var profileCancelBtn = document.getElementById("profile-cancel");
   var apiKeyInput = document.getElementById("api-key");
   var modelFilter = document.getElementById("model-filter");
   var filterProvider = document.getElementById("filter-provider");
@@ -1124,6 +1210,8 @@
     currentChatId = null;
     history = [];
     storageRemove(KEYS.currentChat);
+    var def = defaultProfile();
+    if (def) applyProfile(def.id);
     updateChatTitle();
     renderHistory();
     closeChats();
@@ -1149,7 +1237,8 @@
 
   /* ---------------- Settings ---------------- */
   function updateModelLabel(modelId) {
-    currentModelLabel.textContent = modelId || "No model selected";
+    var p = activeProfileId && profileById(activeProfileId);
+    currentModelLabel.textContent = (modelId || "No model selected") + (p ? " · " + p.name : "");
   }
 
   function updateComposerEnabled() {
@@ -1166,6 +1255,218 @@
     updateComposerEnabled();
   }
 
+  /* ---------------- Profiles ----------------
+     A profile is a named snapshot of model, system prompt and picker
+     filters, plus a record of which of those it sets. Applying one only
+     touches the fields it includes, so a prompt-only persona can be
+     switched without disturbing the model. */
+  var profiles = readJson(KEYS.profiles, []);
+  if (!Array.isArray(profiles)) profiles = [];
+  profiles = profiles.filter(function (p) { return p && typeof p.id === "string" && typeof p.name === "string"; });
+  var activeProfileId = storageGet(KEYS.activeProfile) || null;
+  if (activeProfileId && !profileById(activeProfileId)) activeProfileId = null;
+  var editorMode = null; // "create" | "update"
+
+  function profileById(id) {
+    for (var i = 0; i < profiles.length; i++) if (profiles[i].id === id) return profiles[i];
+    return null;
+  }
+
+  function persistProfiles() {
+    storageSet(KEYS.profiles, JSON.stringify(profiles));
+    if (activeProfileId) storageSet(KEYS.activeProfile, activeProfileId); else storageRemove(KEYS.activeProfile);
+  }
+
+  function modelDisplayName(id) {
+    for (var i = 0; i < allModels.length; i++) if (allModels[i].id === id) {
+      var n = allModels[i].name;
+      return n.indexOf(":") !== -1 ? n.slice(n.indexOf(":") + 1).trim() : n;
+    }
+    return id ? id.split("/").pop().replace(/:free$/, "") : "";
+  }
+
+  function truncateWords(text, max) {
+    text = text.replace(/\s+/g, " ").trim();
+    if (text.length <= max) return text;
+    var cut = text.slice(0, max + 1);
+    var sp = cut.lastIndexOf(" ");
+    return (sp > max / 2 ? cut.slice(0, sp) : cut.slice(0, max)).replace(/[\s,.;:!?-]+$/, "");
+  }
+
+  function suggestProfileName() {
+    var base = "";
+    var meta = currentChatId && chatMeta(currentChatId);
+    if (meta && meta.title && meta.title !== "Untitled chat") base = truncateWords(meta.title, 24);
+    if (!base) base = modelDisplayName(modelSelect.value || chosenModel);
+    if (!base) base = "Profile";
+    var name = base, n = 2;
+    while (profiles.some(function (p) { return p.name === name; })) name = base + " " + (n++);
+    return name;
+  }
+
+  // Current form values as a profile body.
+  function snapshotForm() {
+    return {
+      model: modelSelect.value || chosenModel || "",
+      systemPrompt: systemPromptInput.value.trim(),
+      filters: { provider: filters.provider, capability: filters.capability, budget: filters.budget, text: filters.text }
+    };
+  }
+
+  function profileMatchesCurrent(p) {
+    var inc = p.includes || {};
+    if (inc.model !== false && (p.model || "") !== (storageGet(KEYS.model) || "")) return false;
+    if (inc.prompt !== false && (p.systemPrompt || "") !== (storageGet(KEYS.systemPrompt) || "")) return false;
+    if (inc.filters !== false) {
+      var f = p.filters || {};
+      if ((f.provider || "") !== filters.provider || (f.capability || "") !== filters.capability ||
+          (f.budget || "") !== filters.budget || (f.text || "") !== filters.text) return false;
+    }
+    return true;
+  }
+
+  function renderProfileControls() {
+    profileSelect.innerHTML = "";
+    addOption(profileSelect, "", "No profile");
+    profiles.forEach(function (p) { addOption(profileSelect, p.id, (p.isDefault ? "★ " : "") + p.name); });
+    profileSelect.value = activeProfileId || "";
+    var active = activeProfileId && profileById(activeProfileId);
+    profileUpdateBtn.hidden = !active;
+    profileDefaultBtn.hidden = !active;
+    profileDeleteBtn.hidden = !active;
+    if (active) {
+      profileDefaultBtn.textContent = active.isDefault ? "Unset default" : "Set default";
+      var inc = active.includes || {};
+      var sets = [];
+      if (inc.model !== false) sets.push("model");
+      if (inc.prompt !== false) sets.push("prompt");
+      if (inc.filters !== false) sets.push("filters");
+      profileHint.textContent = "Sets " + (sets.join(", ") || "nothing") +
+        (active.isDefault ? ". Applied to every new chat" : "") +
+        (profileMatchesCurrent(active) ? "." : ". Settings have changed since; tap Update to keep them.");
+    } else {
+      profileHint.textContent = profiles.length
+        ? "Pick a profile to apply it straight away."
+        : "A profile remembers a model, system prompt and filters. Picking one applies it straight away.";
+    }
+  }
+
+  function applyProfile(id) {
+    var p = profileById(id);
+    if (!p) return;
+    var inc = p.includes || {};
+    if (inc.model !== false && p.model) {
+      chosenModel = p.model;
+      storageSet(KEYS.model, p.model);
+    }
+    if (inc.prompt !== false) {
+      if (p.systemPrompt) storageSet(KEYS.systemPrompt, p.systemPrompt); else storageRemove(KEYS.systemPrompt);
+    }
+    if (inc.filters !== false && p.filters) {
+      filters = { provider: p.filters.provider || "", capability: p.filters.capability || "", budget: p.filters.budget || "", text: p.filters.text || "" };
+      persistFilters();
+    }
+    activeProfileId = id;
+    persistProfiles();
+    loadSettingsIntoForm();
+    updateComposerEnabled();
+  }
+
+  function openProfileEditor(mode) {
+    editorMode = mode;
+    var active = mode === "update" && activeProfileId && profileById(activeProfileId);
+    profileNameInput.value = active ? active.name : suggestProfileName();
+    var inc = (active && active.includes) || {};
+    profileIncModel.checked = inc.model !== false;
+    profileIncPrompt.checked = inc.prompt !== false;
+    profileIncFilters.checked = inc.filters !== false;
+    profileSaveBtn.textContent = active ? "Update profile" : "Save profile";
+    profileEditor.hidden = false;
+    profileNameInput.focus();
+    profileNameInput.select();
+  }
+
+  function closeProfileEditor() {
+    editorMode = null;
+    profileEditor.hidden = true;
+  }
+
+  function commitProfileEditor() {
+    var name = profileNameInput.value.trim() || suggestProfileName();
+    var body = snapshotForm();
+    var includes = { model: profileIncModel.checked, prompt: profileIncPrompt.checked, filters: profileIncFilters.checked };
+    var p;
+    if (editorMode === "update" && activeProfileId && profileById(activeProfileId)) {
+      p = profileById(activeProfileId);
+    } else {
+      p = { id: newId(), created: Date.now(), isDefault: false };
+      profiles.push(p);
+    }
+    p.name = name;
+    p.model = body.model;
+    p.systemPrompt = body.systemPrompt;
+    p.filters = body.filters;
+    p.includes = includes;
+    p.updated = Date.now();
+    activeProfileId = p.id;
+    // Saving a profile also saves the settings it was taken from.
+    if (body.model) storageSet(KEYS.model, body.model); else storageRemove(KEYS.model);
+    chosenModel = body.model;
+    if (body.systemPrompt) storageSet(KEYS.systemPrompt, body.systemPrompt); else storageRemove(KEYS.systemPrompt);
+    persistProfiles();
+    closeProfileEditor();
+    updateModelLabel(chosenModel);
+    updateComposerEnabled();
+    renderProfileControls();
+  }
+
+  function deleteActiveProfile() {
+    var p = activeProfileId && profileById(activeProfileId);
+    if (!p) return;
+    if (!confirm("Delete profile \"" + p.name + "\"? Your current settings stay as they are.")) return;
+    profiles = profiles.filter(function (q) { return q.id !== p.id; });
+    activeProfileId = null;
+    persistProfiles();
+    updateModelLabel(chosenModel);
+    renderProfileControls();
+  }
+
+  function toggleDefaultProfile() {
+    var p = activeProfileId && profileById(activeProfileId);
+    if (!p) return;
+    var makeDefault = !p.isDefault;
+    profiles.forEach(function (q) { q.isDefault = false; });
+    p.isDefault = makeDefault;
+    persistProfiles();
+    renderProfileControls();
+  }
+
+  function defaultProfile() {
+    for (var i = 0; i < profiles.length; i++) if (profiles[i].isDefault) return profiles[i];
+    return null;
+  }
+
+  profileSelect.addEventListener("change", function () {
+    closeProfileEditor();
+    if (profileSelect.value) {
+      applyProfile(profileSelect.value);
+    } else {
+      activeProfileId = null;
+      persistProfiles();
+      updateModelLabel(chosenModel);
+      renderProfileControls();
+    }
+  });
+  profileNewBtn.addEventListener("click", function () { openProfileEditor("create"); });
+  profileUpdateBtn.addEventListener("click", function () { openProfileEditor("update"); });
+  profileDefaultBtn.addEventListener("click", toggleDefaultProfile);
+  profileDeleteBtn.addEventListener("click", deleteActiveProfile);
+  profileSaveBtn.addEventListener("click", commitProfileEditor);
+  profileCancelBtn.addEventListener("click", closeProfileEditor);
+  profileNameInput.addEventListener("keydown", function (e) {
+    if (e.key === "Enter") { e.preventDefault(); commitProfileEditor(); }
+  });
+
   function loadSettingsIntoForm() {
     apiKeyInput.value = storageGet(KEYS.apiKey) || "";
     systemPromptInput.value = storageGet(KEYS.systemPrompt) || "";
@@ -1173,6 +1474,7 @@
     updateModelLabel(chosenModel);
     syncFilterControls();
     rebuildModelOptions();
+    renderProfileControls();
   }
 
   /* ---------------- Model catalogue ----------------
@@ -1410,6 +1712,7 @@
     chosenModel = model;
     updateModelLabel(model);
     updateComposerEnabled();
+    renderProfileControls();
     closeSettings();
   });
 
