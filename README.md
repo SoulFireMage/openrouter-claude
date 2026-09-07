@@ -25,6 +25,10 @@ just static files.
   stops any reply still streaming; the partial reply is kept in its own chat.
 - Streaming replies with a **Stop** button (partial text is kept).
 - **Retry** on any failed request, including one left dangling by a reload.
+- Export and import: the chats drawer writes every chat and profile to one
+  JSON file (never the API key), with a Share button on phones that support
+  it. Import merges: unchanged chats are skipped, changed ones are added as
+  copies, nothing already on the device is overwritten.
 - Profiles: named snapshots of model, system prompt and picker filters,
   stored on the device. Each profile records which of those it sets, so a
   prompt-only persona can be applied without changing the model. The starred
@@ -92,7 +96,7 @@ Vendored under `vendor/` so the app works offline and depends on no CDN:
 
 ## Ideas for later
 
-- Export and import chats as a JSON file, for backup or moving devices.
+- Export a single chat as Markdown for sharing.
 - Rename chats.
 - Cap or summarise old history so long threads don't grow the per-request cost
   without bound.
