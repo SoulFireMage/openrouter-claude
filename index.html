@@ -1263,9 +1263,19 @@
   var profiles = readJson(KEYS.profiles, []);
   if (!Array.isArray(profiles)) profiles = [];
   profiles = profiles.filter(function (p) { return p && typeof p.id === "string" && typeof p.name === "string"; });
+  profiles.forEach(normaliseProfile);
   var activeProfileId = storageGet(KEYS.activeProfile) || null;
   if (activeProfileId && !profileById(activeProfileId)) activeProfileId = null;
   var editorMode = null; // "create" | "update"
+
+  // A profile can only "set the model" if it has one. Recording an empty
+  // model as included would make apply and the drift check disagree, and
+  // applying it would disable the composer, so it is normalised away here.
+  function normaliseProfile(p) {
+    if (!p.includes || typeof p.includes !== "object") p.includes = { model: true, prompt: true, filters: true };
+    if (p.includes.model !== false && !p.model) p.includes.model = false;
+    return p;
+  }
 
   function profileById(id) {
     for (var i = 0; i < profiles.length; i++) if (profiles[i].id === id) return profiles[i];
@@ -1377,7 +1387,9 @@
     var active = mode === "update" && activeProfileId && profileById(activeProfileId);
     profileNameInput.value = active ? active.name : suggestProfileName();
     var inc = (active && active.includes) || {};
-    profileIncModel.checked = inc.model !== false;
+    var hasModel = !!(modelSelect.value || chosenModel);
+    profileIncModel.disabled = !hasModel;
+    profileIncModel.checked = hasModel && inc.model !== false;
     profileIncPrompt.checked = inc.prompt !== false;
     profileIncFilters.checked = inc.filters !== false;
     profileSaveBtn.textContent = active ? "Update profile" : "Save profile";
@@ -1394,7 +1406,7 @@
   function commitProfileEditor() {
     var name = profileNameInput.value.trim() || suggestProfileName();
     var body = snapshotForm();
-    var includes = { model: profileIncModel.checked, prompt: profileIncPrompt.checked, filters: profileIncFilters.checked };
+    var includes = { model: profileIncModel.checked && !!body.model, prompt: profileIncPrompt.checked, filters: profileIncFilters.checked };
     var p;
     if (editorMode === "update" && activeProfileId && profileById(activeProfileId)) {
       p = profileById(activeProfileId);
@@ -1408,6 +1420,7 @@
     p.filters = body.filters;
     p.includes = includes;
     p.updated = Date.now();
+    normaliseProfile(p);
     activeProfileId = p.id;
     // Saving a profile also saves the settings it was taken from.
     if (body.model) storageSet(KEYS.model, body.model); else storageRemove(KEYS.model);
