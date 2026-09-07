@@ -403,6 +403,30 @@
     padding: 20px 0;
   }
 
+  #chats-tools {
+    margin-top: auto;
+    padding-top: 14px;
+    border-top: 1px solid var(--border);
+  }
+
+  #chats-tools .btn-row { margin-top: 0; }
+
+  #chats-tools .hint {
+    font-size: 11px;
+    color: var(--text-muted);
+    margin-top: 8px;
+    line-height: 1.4;
+  }
+
+  #transfer-status {
+    font-size: 12px;
+    color: var(--text);
+    margin-top: 8px;
+    min-height: 1em;
+  }
+
+  #transfer-status.error { color: var(--error); }
+
   #settings-panel {
     position: fixed;
     right: 0;
@@ -614,6 +638,16 @@
     <h2>Chats</h2>
     <button class="btn primary" id="new-chat-btn">New chat</button>
     <div id="chat-list"></div>
+    <div id="chats-tools">
+      <div class="btn-row">
+        <button type="button" class="btn" id="export-btn">Export</button>
+        <button type="button" class="btn" id="share-btn" hidden>Share…</button>
+        <button type="button" class="btn" id="import-btn">Import</button>
+      </div>
+      <input type="file" id="import-file" accept="application/json,.json" hidden>
+      <div id="transfer-status"></div>
+      <div class="hint">Export writes all chats and profiles to a JSON file. Your API key is never included. Import merges: chats you already have are skipped, changed copies are added alongside.</div>
+    </div>
   </div>
 </div>
 
@@ -854,6 +888,11 @@
   var newChatBtn = document.getElementById("new-chat-btn");
   var chatListEl = document.getElementById("chat-list");
   var chatTitleEl = document.getElementById("chat-title");
+  var exportBtn = document.getElementById("export-btn");
+  var shareBtn = document.getElementById("share-btn");
+  var importBtn = document.getElementById("import-btn");
+  var importFile = document.getElementById("import-file");
+  var transferStatus = document.getElementById("transfer-status");
   var profileSelect = document.getElementById("profile-select");
   var profileHint = document.getElementById("profile-hint");
   var profileNewBtn = document.getElementById("profile-new");
@@ -1228,6 +1267,177 @@
     if (id === currentChatId) startNewChat();
     renderChatList();
   }
+
+  /* ---------------- Export / import ----------------
+     A single JSON file: every chat with its messages, plus profiles.
+     Never the API key. Import merges; it cannot overwrite what is here. */
+  var EXPORT_FORMAT = "openrouter-chat";
+  var EXPORT_VERSION = 1;
+
+  function buildExport() {
+    return {
+      format: EXPORT_FORMAT,
+      version: EXPORT_VERSION,
+      exportedAt: new Date().toISOString(),
+      chats: chats.map(function (c) {
+        return { id: c.id, title: c.title, created: c.created, updated: c.updated, model: c.model, messages: loadChat(c.id) };
+      }),
+      profiles: profiles.map(function (p) {
+        return { id: p.id, name: p.name, model: p.model, systemPrompt: p.systemPrompt, filters: p.filters, includes: p.includes, created: p.created, updated: p.updated };
+      })
+    };
+  }
+
+  function exportFileName() {
+    return "openrouter-chat-export-" + new Date().toISOString().slice(0, 10) + ".json";
+  }
+
+  function setTransferStatus(text, isError) {
+    transferStatus.textContent = text;
+    transferStatus.classList.toggle("error", !!isError);
+  }
+
+  function exportChats() {
+    var json = JSON.stringify(buildExport(), null, 2);
+    var blob = new Blob([json], { type: "application/json" });
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement("a");
+    a.href = url;
+    a.download = exportFileName();
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(function () { URL.revokeObjectURL(url); }, 10000);
+    setTransferStatus("Exported " + chats.length + " chat" + (chats.length === 1 ? "" : "s") + " and " + profiles.length + " profile" + (profiles.length === 1 ? "" : "s") + ".");
+  }
+
+  function canShareFiles() {
+    try {
+      if (!navigator.share || !navigator.canShare) return false;
+      var probe = new File(["{}"], "probe.json", { type: "application/json" });
+      return navigator.canShare({ files: [probe] });
+    } catch (e) {
+      return false;
+    }
+  }
+
+  function shareChats() {
+    var file = new File([JSON.stringify(buildExport(), null, 2)], exportFileName(), { type: "application/json" });
+    navigator.share({ files: [file], title: "OpenRouter Chat export" }).then(function () {
+      setTransferStatus("Shared.");
+    }).catch(function (e) {
+      if (e && e.name !== "AbortError") setTransferStatus("Couldn't share: " + e.message, true);
+    });
+  }
+
+  function sameMessages(a, b) {
+    if (a.length !== b.length) return false;
+    for (var i = 0; i < a.length; i++) {
+      if (a[i].role !== b[i].role || a[i].content !== b[i].content) return false;
+    }
+    return true;
+  }
+
+  function importFromObject(data) {
+    if (!data || typeof data !== "object" || data.format !== EXPORT_FORMAT || !Array.isArray(data.chats)) {
+      throw new Error("Not an OpenRouter Chat export file");
+    }
+    var added = 0, skipped = 0, failed = 0, profilesAdded = 0, profilesSkipped = 0;
+
+    data.chats.forEach(function (c) {
+      if (!c || typeof c !== "object") return;
+      var messages = cleanMessages(c.messages);
+      if (messages.length === 0) return;
+      var existing = typeof c.id === "string" ? chatMeta(c.id) : null;
+      if (existing && sameMessages(loadChat(existing.id), messages)) { skipped++; return; }
+      var id = existing || typeof c.id !== "string" ? newId() : c.id;
+      var firstUser = messages.filter(function (m) { return m.role === "user"; })[0];
+      var lastModel = messages.filter(function (m) { return m.role === "assistant" && m.model; }).pop();
+      var meta = {
+        id: id,
+        title: (typeof c.title === "string" && c.title.trim()) || titleFrom(firstUser ? firstUser.content : ""),
+        created: typeof c.created === "number" ? c.created : Date.now(),
+        updated: typeof c.updated === "number" ? c.updated : Date.now(),
+        model: (typeof c.model === "string" && c.model) || (lastModel ? lastModel.model : ""),
+        count: messages.length
+      };
+      if (existing) meta.title += " (imported copy)";
+      if (!saveChat(id, messages)) { failed++; return; }
+      chats.push(meta);
+      added++;
+    });
+    chats.sort(function (a, b) { return b.updated - a.updated; });
+    if (!storageSet(KEYS.chats, JSON.stringify(chats))) failed++;
+
+    if (Array.isArray(data.profiles)) {
+      data.profiles.forEach(function (p) {
+        if (!p || typeof p !== "object" || typeof p.name !== "string") return;
+        var existing = typeof p.id === "string" ? profileById(p.id) : null;
+        var incoming = {
+          id: existing || typeof p.id !== "string" ? newId() : p.id,
+          name: p.name,
+          model: typeof p.model === "string" ? p.model : "",
+          systemPrompt: typeof p.systemPrompt === "string" ? p.systemPrompt : "",
+          filters: p.filters && typeof p.filters === "object" ? p.filters : {},
+          includes: p.includes && typeof p.includes === "object" ? p.includes : undefined,
+          isDefault: false,
+          created: typeof p.created === "number" ? p.created : Date.now(),
+          updated: typeof p.updated === "number" ? p.updated : Date.now()
+        };
+        normaliseProfile(incoming);
+        if (existing && existing.model === incoming.model && existing.systemPrompt === incoming.systemPrompt &&
+            JSON.stringify(existing.filters || {}) === JSON.stringify(incoming.filters) &&
+            JSON.stringify(existing.includes) === JSON.stringify(incoming.includes)) { profilesSkipped++; return; }
+        if (existing || profiles.some(function (q) { return q.name === incoming.name; })) incoming.name += " (imported)";
+        profiles.push(incoming);
+        profilesAdded++;
+      });
+      persistProfiles();
+    }
+
+    return { added: added, skipped: skipped, failed: failed, profilesAdded: profilesAdded, profilesSkipped: profilesSkipped };
+  }
+
+  function importChatsFromFile(file) {
+    if (!file) return;
+    setTransferStatus("Importing…");
+    var finish = function (text) {
+      var data;
+      try {
+        data = JSON.parse(text);
+      } catch (e) {
+        setTransferStatus("That file isn't valid JSON.", true);
+        return;
+      }
+      try {
+        var r = importFromObject(data);
+        var bits = ["Imported " + r.added + " chat" + (r.added === 1 ? "" : "s")];
+        if (r.skipped) bits.push(r.skipped + " already here");
+        if (r.profilesAdded) bits.push(r.profilesAdded + " profile" + (r.profilesAdded === 1 ? "" : "s"));
+        if (r.profilesSkipped) bits.push(r.profilesSkipped + " profile" + (r.profilesSkipped === 1 ? "" : "s") + " already here");
+        if (r.failed) bits.push(r.failed + " failed (storage full?)");
+        setTransferStatus(bits.join(", ") + ".", r.failed > 0);
+        renderChatList();
+        renderProfileControls();
+      } catch (e) {
+        setTransferStatus(e.message, true);
+      }
+    };
+    if (file.text) {
+      file.text().then(finish, function () { setTransferStatus("Couldn't read that file.", true); });
+    } else {
+      var reader = new FileReader();
+      reader.onload = function () { finish(String(reader.result)); };
+      reader.onerror = function () { setTransferStatus("Couldn't read that file.", true); };
+      reader.readAsText(file);
+    }
+  }
+
+  exportBtn.addEventListener("click", exportChats);
+  shareBtn.addEventListener("click", shareChats);
+  importBtn.addEventListener("click", function () { importFile.value = ""; importFile.click(); });
+  importFile.addEventListener("change", function () { importChatsFromFile(importFile.files && importFile.files[0]); });
+  if (canShareFiles()) shareBtn.hidden = false;
 
   openChatsBtn.addEventListener("click", openChats);
   newChatBtn.addEventListener("click", startNewChat);
