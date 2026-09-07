@@ -1330,12 +1330,27 @@
     });
   }
 
+  // "Same chat" means the same conversation text. Assistant metadata (model,
+  // usage, provider) is deliberately ignored: a chat you already have should
+  // not come back as a copy because a footer field differs between exports.
   function sameMessages(a, b) {
     if (a.length !== b.length) return false;
     for (var i = 0; i < a.length; i++) {
       if (a[i].role !== b[i].role || a[i].content !== b[i].content) return false;
     }
     return true;
+  }
+
+  function sameFilters(a, b) {
+    a = a || {}; b = b || {};
+    return (a.provider || "") === (b.provider || "") && (a.capability || "") === (b.capability || "") &&
+           (a.budget || "") === (b.budget || "") && (a.text || "") === (b.text || "");
+  }
+
+  function sameIncludes(a, b) {
+    a = a || {}; b = b || {};
+    return (a.model !== false) === (b.model !== false) && (a.prompt !== false) === (b.prompt !== false) &&
+           (a.filters !== false) === (b.filters !== false);
   }
 
   function importFromObject(data) {
@@ -1371,11 +1386,13 @@
 
     if (Array.isArray(data.profiles)) {
       data.profiles.forEach(function (p) {
-        if (!p || typeof p !== "object" || typeof p.name !== "string") return;
+        if (!p || typeof p !== "object") return;
+        var name = typeof p.name === "string" ? p.name.replace(/\s+/g, " ").trim().slice(0, 40) : "";
+        if (!name) name = "Imported profile";
         var existing = typeof p.id === "string" ? profileById(p.id) : null;
         var incoming = {
           id: existing || typeof p.id !== "string" ? newId() : p.id,
-          name: p.name,
+          name: name,
           model: typeof p.model === "string" ? p.model : "",
           systemPrompt: typeof p.systemPrompt === "string" ? p.systemPrompt : "",
           filters: p.filters && typeof p.filters === "object" ? p.filters : {},
@@ -1386,8 +1403,7 @@
         };
         normaliseProfile(incoming);
         if (existing && existing.model === incoming.model && existing.systemPrompt === incoming.systemPrompt &&
-            JSON.stringify(existing.filters || {}) === JSON.stringify(incoming.filters) &&
-            JSON.stringify(existing.includes) === JSON.stringify(incoming.includes)) { profilesSkipped++; return; }
+            sameFilters(existing.filters, incoming.filters) && sameIncludes(existing.includes, incoming.includes)) { profilesSkipped++; return; }
         if (existing || profiles.some(function (q) { return q.name === incoming.name; })) incoming.name += " (imported)";
         profiles.push(incoming);
         profilesAdded++;
