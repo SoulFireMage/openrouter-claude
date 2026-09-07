@@ -25,6 +25,11 @@ just static files.
   stops any reply still streaming; the partial reply is kept in its own chat.
 - Streaming replies with a **Stop** button (partial text is kept).
 - **Retry** on any failed request, including one left dangling by a reload.
+- Profiles: named snapshots of model, system prompt and picker filters,
+  stored on the device. Each profile records which of those it sets, so a
+  prompt-only persona can be applied without changing the model. The starred
+  default profile is applied to every new chat. Suggested names come from the
+  current chat's title, falling back to the model's name.
 - Model picker with provider, capability (vision, reasoning, tools) and budget
   filters plus text search, grouped by provider, with context window and
   per-million-token pricing shown for the selected model.
