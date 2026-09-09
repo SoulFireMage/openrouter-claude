@@ -198,6 +198,67 @@
     white-space: normal;
   }
 
+  /* ---------- Copy controls ---------- */
+  .msg-actions {
+    display: flex;
+    align-items: flex-end;
+    justify-content: space-between;
+    gap: 8px;
+    margin-top: 6px;
+  }
+
+  .msg-actions .meta { margin-top: 0; flex: 1; min-width: 0; }
+
+  .copy-btn {
+    background: none;
+    border: 1px solid transparent;
+    color: inherit;
+    opacity: 0.65;
+    padding: 4px 6px;
+    border-radius: 6px;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 11px;
+    font-family: inherit;
+    line-height: 1;
+    flex: none;
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  .copy-btn:active { opacity: 1; background: rgba(255, 255, 255, 0.08); }
+  .copy-btn.copied { opacity: 1; color: var(--accent); }
+  .msg.user .copy-btn.copied { color: var(--accent-text); }
+  .copy-btn svg { width: 14px; height: 14px; display: block; }
+  .copy-btn .icon-check { display: none; }
+  .copy-btn.copied .icon-copy { display: none; }
+  .copy-btn.copied .icon-check { display: block; }
+
+  .codeblock {
+    margin: 6px 0 10px;
+    border-radius: 8px;
+    overflow: hidden;
+    background: rgba(0, 0, 0, 0.35);
+  }
+
+  .codeblock-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 2px 4px 2px 12px;
+    font-size: 11px;
+    color: var(--text-muted);
+    background: rgba(255, 255, 255, 0.04);
+    font-family: var(--mono);
+  }
+
+  .codeblock pre {
+    margin: 0;
+    border-radius: 0;
+    background: none;
+  }
+
   .msg pre {
     background: rgba(0, 0, 0, 0.35);
     padding: 10px 12px;
@@ -1044,6 +1105,81 @@
     return renderMarkdownBasic(text);
   }
 
+  /* ---------------- Copy to clipboard ---------------- */
+  var COPY_ICON = '<svg class="icon-copy" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>' +
+                  '<svg class="icon-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>';
+
+  function legacyCopy(text) {
+    var ta = document.createElement("textarea");
+    ta.value = text;
+    ta.setAttribute("readonly", "");
+    ta.style.position = "fixed";
+    ta.style.top = "0";
+    ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    ta.select();
+    var ok = false;
+    try { ok = document.execCommand("copy"); } catch (e) { ok = false; }
+    ta.remove();
+    return ok;
+  }
+
+  function copyText(text) {
+    if (navigator.clipboard && window.isSecureContext) {
+      return navigator.clipboard.writeText(text).then(function () { return true; }, function () { return legacyCopy(text); });
+    }
+    return Promise.resolve(legacyCopy(text));
+  }
+
+  function makeCopyButton(label, getText) {
+    var btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "copy-btn";
+    btn.setAttribute("aria-label", label);
+    btn.innerHTML = COPY_ICON + (label === "Copy code" ? "<span>Copy</span>" : "");
+    btn.addEventListener("click", function () {
+      copyText(getText()).then(function (ok) {
+        if (!ok) { btn.setAttribute("aria-label", "Copy failed"); return; }
+        btn.classList.add("copied");
+        var span = btn.querySelector("span");
+        if (span) span.textContent = "Copied";
+        setTimeout(function () {
+          btn.classList.remove("copied");
+          if (span) span.textContent = "Copy";
+        }, 1500);
+      });
+    });
+    return btn;
+  }
+
+  // Wrap each rendered <pre> in a header bar with the language and a Copy button.
+  function decorateCodeBlocks(root) {
+    var pres = root.querySelectorAll("pre");
+    for (var i = 0; i < pres.length; i++) {
+      var pre = pres[i];
+      if (pre.parentNode && pre.parentNode.classList && pre.parentNode.classList.contains("codeblock")) continue;
+      var code = pre.querySelector("code");
+      var lang = "";
+      if (code) {
+        var m = /(?:^|\s)language-([\w+#.-]+)/.exec(code.className || "");
+        if (m) lang = m[1];
+      }
+      var wrap = document.createElement("div");
+      wrap.className = "codeblock";
+      var head = document.createElement("div");
+      head.className = "codeblock-head";
+      var langEl = document.createElement("span");
+      langEl.textContent = lang || "code";
+      head.appendChild(langEl);
+      head.appendChild(makeCopyButton("Copy code", (function (c, p) {
+        return function () { return (c || p).textContent.replace(/\n$/, ""); };
+      })(code, pre)));
+      pre.parentNode.insertBefore(wrap, pre);
+      wrap.appendChild(head);
+      wrap.appendChild(pre);
+    }
+  }
+
   /* ---------------- Rendering ---------------- */
   function isNearBottom() {
     return messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight < 80;
@@ -1080,15 +1216,19 @@
     el.className = "msg " + m.role;
     if (m.role === "assistant") {
       el.innerHTML = renderMarkdown(m.content);
-      var meta = formatMeta(m);
-      if (meta) {
-        var metaEl = document.createElement("span");
-        metaEl.className = "meta";
-        metaEl.textContent = meta;
-        el.appendChild(metaEl);
-      }
+      decorateCodeBlocks(el);
     } else {
       el.textContent = m.content;
+    }
+    if (m.content) {
+      var actions = document.createElement("div");
+      actions.className = "msg-actions";
+      var metaEl = document.createElement("span");
+      metaEl.className = "meta";
+      metaEl.textContent = m.role === "assistant" ? formatMeta(m) : "";
+      actions.appendChild(metaEl);
+      actions.appendChild(makeCopyButton("Copy message", function () { return m.content; }));
+      el.appendChild(actions);
     }
     messagesEl.appendChild(el);
     return el;
@@ -2062,6 +2202,7 @@
       renderTimer = setTimeout(function () {
         renderTimer = null;
         assistantEl.innerHTML = renderMarkdown(fullText);
+        decorateCodeBlocks(assistantEl);
         scrollToBottom(false);
       }, 100);
     }

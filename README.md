@@ -39,6 +39,8 @@ just static files.
   per-million-token pricing shown for the selected model.
 - Per-reply footer showing model, token counts and cost, as reported by
   OpenRouter.
+- Copy: every turn has a copy icon that copies the message's raw markdown,
+  and every code block has a header with its language and a Copy button.
 - Full markdown (headings, lists, tables, quotes, links, code) and LaTeX
   maths (`$...$`, `$$...$$`, `\(...\)`, `\[...\]`) in replies, rendered with
   marked and KaTeX and sanitised with DOMPurify. Raw HTML in model output is
