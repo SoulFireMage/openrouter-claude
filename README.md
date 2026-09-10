@@ -37,8 +37,9 @@ just static files.
 - Model picker with provider, capability (vision, reasoning, tools) and budget
   filters plus text search, grouped by provider, with context window and
   per-million-token pricing shown for the selected model.
-- Per-reply footer showing model, token counts and cost, as reported by
-  OpenRouter.
+- Per-reply footer showing the model and provider that served it, token
+  counts and cost as reported by OpenRouter, time to first token, and
+  generation speed in tokens per second.
 - Copy: every turn has a copy icon that copies the message's raw markdown,
   and every code block has a header with its language and a Copy button.
 - Full markdown (headings, lists, tables, quotes, links, code) and LaTeX

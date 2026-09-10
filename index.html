@@ -1207,6 +1207,14 @@
       if (typeof pt === "number" && typeof ct === "number") bits.push(pt + "→" + ct + " tokens");
       if (typeof m.usage.cost === "number") bits.push("$" + m.usage.cost.toFixed(4));
     }
+    if (m.timing) {
+      if (typeof m.timing.wait === "number" && m.timing.wait >= 0) bits.push((m.timing.wait / 1000).toFixed(1) + "s wait");
+      var ct2 = m.usage && m.usage.completion_tokens;
+      if (typeof ct2 === "number" && ct2 > 0 && typeof m.timing.gen === "number" && m.timing.gen > 0) {
+        var tps = ct2 / (m.timing.gen / 1000);
+        bits.push((tps < 10 ? tps.toFixed(1) : Math.round(tps)) + " tok/s");
+      }
+    }
     if (m.stopped) bits.push("stopped");
     return bits.join(" · ");
   }
@@ -2191,6 +2199,9 @@
 
     var fullText = "";
     var usage = null;
+    var tStart = performance.now();
+    var tFirst = null;
+    var tLast = null;
     var servedModel = null;
     var servedProvider = null;
     var renderTimer = null;
@@ -2207,7 +2218,13 @@
       }, 100);
     }
 
+    function timing() {
+      if (tFirst === null) return null;
+      return { wait: Math.round(tFirst - tStart), gen: Math.round(tLast - tFirst) };
+    }
+
     function finish(entry) {
+      entry.timing = timing();
       if (renderTimer) { clearTimeout(renderTimer); renderTimer = null; }
       if (currentChatId === sendChatId) {
         assistantEl.remove();
@@ -2276,6 +2293,8 @@
           var choice = json.choices && json.choices[0];
           var piece = choice && choice.delta && choice.delta.content;
           if (piece) {
+            tLast = performance.now();
+            if (tFirst === null) tFirst = tLast;
             fullText += piece;
             queueRender();
           }
