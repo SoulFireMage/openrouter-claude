@@ -2676,7 +2676,9 @@
     "amazon": "aws", "azure": "microsoft", "microsoft-azure": "microsoft", "nousresearch": "nous",
     "nous-research": "nous", "ibm-granite": "ibm", "liquidai": "liquid", "liquid-ai": "liquid",
     "bytedance-seed": "bytedance", "deepseek-ai": "deepseek", "google-deepmind": "google",
-    "cohereforai": "cohere", "cohere-for-ai": "cohere"
+    "cohereforai": "cohere", "cohere-for-ai": "cohere", "allenai": "ai2", "stepfun-ai": "stepfun",
+    "arcee-ai": "arcee", "meituan": "longcat", "meituan-longcat": "longcat", "nex-agi": "nex",
+    "lgai": "lg", "lgai-exaone": "lg", "lg-ai-research": "lg"
   };
 
   function canonCreator(s) {
@@ -2688,9 +2690,13 @@
   var AA_LOOSE_DROP = { preview: 1, exp: 1, experimental: 1, beta: 1 };
   var AA_REASONING = { thinking: 1, reasoning: 1 };
 
+  // "+" is meaningful ("Command A+" is not "Command A"), and a
+  // "non-reasoning" variant is a different model from the base entry, so
+  // both become tokens of their own rather than being stripped.
   function aaTokens(s) {
     return String(s || "").toLowerCase()
-      .replace(/non[\s_-]*reasoning/g, " ")
+      .replace(/\+/g, " plus ")
+      .replace(/non[\s_-]*reasoning/g, " nonreasoning ")
       .replace(/[^a-z0-9]+/g, " ").trim().split(/\s+/)
       .filter(function (t) { return t && !AA_NOISE[t]; });
   }
