@@ -2882,10 +2882,13 @@
         throw new Error("HTTP " + res.status);
       } else {
         var json = await res.json();
-        var raw = json && Array.isArray(json.data) ? json.data : [];
-        var models = raw.map(normaliseAA).filter(Boolean);
-        var fetchedAt = json && typeof json.fetchedAt === "string" ? Date.parse(json.fetchedAt) : NaN;
-        aaCache = models.length ? { fetchedAt: isFinite(fetchedAt) ? fetchedAt : null, models: models } : null;
+        // A published file that parses but holds no usable models is a fault,
+        // not the same thing as "not published yet"; surface it.
+        if (!json || !Array.isArray(json.data)) throw new Error("the scores file has no model list");
+        var models = json.data.map(normaliseAA).filter(Boolean);
+        if (!models.length) throw new Error("the scores file has no usable models");
+        var fetchedAt = typeof json.fetchedAt === "string" ? Date.parse(json.fetchedAt) : NaN;
+        aaCache = { fetchedAt: isFinite(fetchedAt) ? fetchedAt : null, models: models };
         aaError = "";
       }
     } catch (e) {
@@ -3053,6 +3056,7 @@
     card.setAttribute("data-id", m.id);
     var main = el("button", "mcard-main");
     main.type = "button";
+    main.setAttribute("aria-expanded", "false");
     var top = el("div", "mcard-top");
     top.appendChild(el("span", "mcard-name", m.name));
     top.appendChild(el("span", "score" + (tier ? " tier-" + tier : ""), v === null ? "–" : (m.aaApprox ? "~" : "") + Math.round(v)));
@@ -3078,6 +3082,7 @@
     main.addEventListener("click", function () {
       if (detail.hidden && !detail.childNodes.length) fillDetail(detail, m);
       detail.hidden = !detail.hidden;
+      main.setAttribute("aria-expanded", detail.hidden ? "false" : "true");
     });
     card.appendChild(main);
     card.appendChild(detail);
