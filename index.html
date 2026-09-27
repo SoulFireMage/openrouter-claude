@@ -25,6 +25,8 @@
 
   * { box-sizing: border-box; }
 
+  [hidden] { display: none !important; }
+
   html, body {
     height: 100%;
     margin: 0;
@@ -564,6 +566,183 @@
     cursor: pointer;
   }
 
+  .model-links {
+    display: flex;
+    justify-content: space-between;
+    gap: 10px;
+  }
+
+  #settings-panel .hint.error { color: var(--error); }
+
+  /* ---------- Model browser ---------- */
+  #browse-view {
+    position: fixed;
+    inset: 0;
+    z-index: 30;
+    background: var(--bg);
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior: contain;
+  }
+
+  .browse-bar {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: max(10px, env(safe-area-inset-top)) 12px 10px 6px;
+    background: var(--bg);
+    border-bottom: 1px solid var(--border);
+  }
+
+  .browse-bar h2 { flex: 1; font-size: 16px; margin: 0; }
+  .browse-bar .link-btn { margin-top: 0; font-size: 13px; }
+
+  .browse-controls {
+    display: grid;
+    gap: 6px;
+    padding: 12px 14px 4px;
+  }
+
+  .browse-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 6px;
+  }
+
+  .browse-controls input,
+  .browse-controls select {
+    width: 100%;
+    min-width: 0;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 9px 10px;
+    border-radius: 8px;
+    font-size: 16px;
+    font-family: inherit;
+  }
+
+  #browse-status {
+    padding: 6px 14px;
+    font-size: 12px;
+    color: var(--text-muted);
+  }
+
+  #browse-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 2px 14px;
+  }
+
+  .mcard {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    overflow: hidden;
+  }
+
+  .mcard.current { border-color: var(--accent); }
+
+  .mcard-main {
+    display: block;
+    width: 100%;
+    text-align: left;
+    background: none;
+    border: none;
+    color: var(--text);
+    padding: 10px 12px;
+    font-family: inherit;
+    cursor: pointer;
+  }
+
+  .mcard-top { display: flex; align-items: center; gap: 10px; }
+
+  .mcard-name {
+    flex: 1;
+    min-width: 0;
+    font-size: 14px;
+    font-weight: 600;
+    overflow-wrap: anywhere;
+  }
+
+  .score {
+    flex: none;
+    min-width: 42px;
+    text-align: center;
+    font-weight: 700;
+    font-size: 15px;
+    padding: 3px 8px;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.06);
+    color: var(--text-muted);
+  }
+
+  .score.tier-frontier { background: rgba(79, 168, 216, 0.25); color: #9fd3ef; }
+  .score.tier-strong { background: rgba(94, 186, 125, 0.22); color: #a3dcb6; }
+  .score.tier-capable { background: rgba(214, 178, 80, 0.2); color: #e5cc86; }
+  .score.tier-light { background: rgba(226, 114, 91, 0.18); color: #eea08f; }
+
+  .mcard-sub { font-size: 12px; color: var(--text-muted); margin-top: 4px; }
+
+  .mbar {
+    height: 4px;
+    margin-top: 8px;
+    border-radius: 2px;
+    background: rgba(255, 255, 255, 0.06);
+    overflow: hidden;
+  }
+
+  .mbar span { display: block; height: 100%; background: var(--accent); }
+
+  .mcard-detail { padding: 0 12px 12px; font-size: 13px; }
+  .mcard-detail .mono-id { font-family: var(--mono); font-size: 12px; color: var(--text-muted); overflow-wrap: anywhere; }
+  .mcard-detail .tier-line { margin-top: 8px; font-weight: 600; }
+  .mcard-detail .gloss { margin: 2px 0 8px; line-height: 1.4; }
+  .mcard-detail .note { font-size: 12px; color: var(--text-muted); margin-top: 8px; line-height: 1.4; }
+
+  .stat-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 6px;
+    margin: 8px 0;
+  }
+
+  .stat {
+    background: rgba(255, 255, 255, 0.04);
+    border-radius: 8px;
+    padding: 6px 8px;
+  }
+
+  .stat b { display: block; font-size: 16px; }
+  .stat span { font-size: 11px; color: var(--text-muted); }
+
+  .bench {
+    display: flex;
+    justify-content: space-between;
+    gap: 10px;
+    padding: 3px 0;
+    border-bottom: 1px dashed var(--border);
+    font-size: 12px;
+  }
+
+  .mcard-detail .btn { display: block; width: 100%; margin-top: 10px; }
+
+  #browse-more { display: block; margin: 12px auto 0; }
+
+  #browse-attrib {
+    padding: 16px 14px max(24px, env(safe-area-inset-bottom));
+    font-size: 11px;
+    line-height: 1.5;
+    color: var(--text-muted);
+  }
+
+  #browse-attrib a { color: var(--accent); }
+  #browse-attrib .error-text { color: var(--error); margin-top: 6px; }
+
   #settings-panel .hint {
     font-size: 12px;
     color: var(--text-muted);
@@ -694,6 +873,43 @@
   </button>
 </div>
 
+<div id="browse-view" hidden>
+  <div class="browse-bar">
+    <button class="icon-btn" id="browse-close" aria-label="Back">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg>
+    </button>
+    <h2>Models</h2>
+    <button type="button" class="link-btn" id="browse-refresh" hidden>Refresh scores</button>
+  </div>
+  <div class="browse-controls">
+    <input type="search" id="browse-search" placeholder="Search name or id…" autocomplete="off" autocapitalize="off" spellcheck="false">
+    <div class="browse-row">
+      <select id="browse-sort" aria-label="Sort by">
+        <option value="intel">Sort: intelligence</option>
+        <option value="coding">Sort: coding</option>
+        <option value="math">Sort: maths</option>
+        <option value="price">Sort: output price</option>
+        <option value="speed">Sort: speed</option>
+        <option value="context">Sort: context</option>
+        <option value="newest">Sort: newest</option>
+        <option value="name">Sort: name</option>
+      </select>
+      <select id="browse-intel" aria-label="Intelligence"></select>
+      <select id="browse-provider" aria-label="Provider"></select>
+      <select id="browse-cap" aria-label="Capability">
+        <option value="">Any capability</option>
+        <option value="vision">Vision</option>
+        <option value="reasoning">Reasoning</option>
+        <option value="tools">Tool calling</option>
+        <option value="free">Free</option>
+      </select>
+    </div>
+  </div>
+  <div id="browse-status"></div>
+  <div id="browse-list"></div>
+  <div id="browse-attrib"></div>
+</div>
+
 <div id="chats-overlay">
   <div id="chats-panel">
     <h2>Chats</h2>
@@ -720,6 +936,13 @@
       <label for="api-key">OpenRouter API key</label>
       <input type="password" id="api-key" placeholder="sk-or-v1-…" autocomplete="off" autocapitalize="off" spellcheck="false">
       <div class="hint">Stored only on this device. Get a key at <a href="https://openrouter.ai/settings/keys" target="_blank" rel="noopener">openrouter.ai/settings/keys</a>.</div>
+    </div>
+
+    <div class="field">
+      <label for="aa-key">Artificial Analysis API key (optional)</label>
+      <input type="password" id="aa-key" placeholder="aa_…" autocomplete="off" autocapitalize="off" spellcheck="false">
+      <div class="hint">Adds intelligence scores to the model list. Free key at <a href="https://artificialanalysis.ai/" target="_blank" rel="noopener">artificialanalysis.ai</a>. Stored only on this device; scores refresh weekly.</div>
+      <div class="hint" id="aa-status"></div>
     </div>
 
     <div class="field">
@@ -762,6 +985,9 @@
           <option value="reasoning">Reasoning</option>
           <option value="tools">Tool calling</option>
         </select>
+        <select id="filter-intel" aria-label="Intelligence" hidden>
+          <option value="">Any intelligence</option>
+        </select>
         <select id="filter-budget" aria-label="Budget">
           <option value="">Any price</option>
           <option value="free">Free</option>
@@ -776,7 +1002,10 @@
       </select>
       <div class="hint" id="model-refresh-hint">Models load automatically once a key is saved.</div>
       <div class="hint" id="model-info"></div>
-      <button type="button" class="link-btn" id="reset-filters">Reset filters</button>
+      <div class="model-links">
+        <button type="button" class="link-btn" id="browse-open">Browse &amp; compare models</button>
+        <button type="button" class="link-btn" id="reset-filters">Reset filters</button>
+      </div>
     </div>
 
     <div class="field">
@@ -859,7 +1088,10 @@
     chatPrefix: "orc_chat_",
     filters: "orc_filters",
     profiles: "orc_profiles",
-    activeProfile: "orc_active_profile"
+    activeProfile: "orc_active_profile",
+    aaKey: "orc_aa_key",
+    aaCache: "orc_aa_cache",
+    aaAttempt: "orc_aa_attempt"
   };
 
   /* ---------------- State ----------------
@@ -929,7 +1161,7 @@
   var currentAbort = null;
   var allModels = [];         // normalised model records, see normaliseModel()
   var chosenModel = storageGet(KEYS.model) || "";
-  var filters = { provider: "", capability: "", budget: "", text: "" };
+  var filters = { provider: "", capability: "", budget: "", intel: "", text: "" };
   try {
     var savedFilters = JSON.parse(storageGet(KEYS.filters) || "{}");
     Object.keys(filters).forEach(function (k) {
@@ -972,6 +1204,21 @@
   var filterProvider = document.getElementById("filter-provider");
   var filterCapability = document.getElementById("filter-capability");
   var filterBudget = document.getElementById("filter-budget");
+  var filterIntel = document.getElementById("filter-intel");
+  var aaKeyInput = document.getElementById("aa-key");
+  var aaStatusEl = document.getElementById("aa-status");
+  var browseOpenBtn = document.getElementById("browse-open");
+  var browseView = document.getElementById("browse-view");
+  var browseCloseBtn = document.getElementById("browse-close");
+  var browseRefreshBtn = document.getElementById("browse-refresh");
+  var browseSearch = document.getElementById("browse-search");
+  var browseSort = document.getElementById("browse-sort");
+  var browseIntel = document.getElementById("browse-intel");
+  var browseProvider = document.getElementById("browse-provider");
+  var browseCap = document.getElementById("browse-cap");
+  var browseStatus = document.getElementById("browse-status");
+  var browseList = document.getElementById("browse-list");
+  var browseAttrib = document.getElementById("browse-attrib");
   var resetFiltersBtn = document.getElementById("reset-filters");
   var modelInfo = document.getElementById("model-info");
   var modelSelect = document.getElementById("model-select");
@@ -1492,7 +1739,7 @@
   function sameFilters(a, b) {
     a = a || {}; b = b || {};
     return (a.provider || "") === (b.provider || "") && (a.capability || "") === (b.capability || "") &&
-           (a.budget || "") === (b.budget || "") && (a.text || "") === (b.text || "");
+           (a.budget || "") === (b.budget || "") && (a.intel || "") === (b.intel || "") && (a.text || "") === (b.text || "");
   }
 
   function sameIncludes(a, b) {
@@ -1693,7 +1940,7 @@
     return {
       model: modelSelect.value || chosenModel || "",
       systemPrompt: systemPromptInput.value.trim(),
-      filters: { provider: filters.provider, capability: filters.capability, budget: filters.budget, text: filters.text }
+      filters: { provider: filters.provider, capability: filters.capability, budget: filters.budget, intel: filters.intel, text: filters.text }
     };
   }
 
@@ -1704,7 +1951,7 @@
     if (inc.filters !== false) {
       var f = p.filters || {};
       if ((f.provider || "") !== filters.provider || (f.capability || "") !== filters.capability ||
-          (f.budget || "") !== filters.budget || (f.text || "") !== filters.text) return false;
+          (f.budget || "") !== filters.budget || (f.intel || "") !== filters.intel || (f.text || "") !== filters.text) return false;
     }
     return true;
   }
@@ -1747,7 +1994,7 @@
       if (p.systemPrompt) storageSet(KEYS.systemPrompt, p.systemPrompt); else storageRemove(KEYS.systemPrompt);
     }
     if (inc.filters !== false && p.filters) {
-      filters = { provider: p.filters.provider || "", capability: p.filters.capability || "", budget: p.filters.budget || "", text: p.filters.text || "" };
+      filters = { provider: p.filters.provider || "", capability: p.filters.capability || "", budget: p.filters.budget || "", intel: p.filters.intel || "", text: p.filters.text || "" };
       persistFilters();
     }
     activeProfileId = id;
@@ -1856,6 +2103,8 @@
 
   function loadSettingsIntoForm() {
     apiKeyInput.value = storageGet(KEYS.apiKey) || "";
+    aaKeyInput.value = storageGet(KEYS.aaKey) || "";
+    updateAAStatus();
     systemPromptInput.value = storageGet(KEYS.systemPrompt) || "";
     chosenModel = storageGet(KEYS.model) || "";
     updateModelLabel(chosenModel);
@@ -1895,6 +2144,7 @@
       vision: inputs.indexOf("image") !== -1,
       reasoning: params.indexOf("reasoning") !== -1 || params.indexOf("include_reasoning") !== -1,
       tools: params.indexOf("tools") !== -1,
+      created: typeof m.created === "number" ? m.created : null,
       context: (typeof m.context_length === "number" && m.context_length) || (typeof top.context_length === "number" && top.context_length) || null
     };
   }
@@ -1911,6 +2161,7 @@
       else if (filters.budget === "mid" && (m.outPrice < 1 || m.outPrice >= 10)) return false;
       else if (filters.budget === "high" && m.outPrice < 10) return false;
     }
+    if (filters.intel && aaMatched && !intelMatches(m, filters.intel)) return false;
     if (filters.text) {
       var q = filters.text;
       if (m.id.toLowerCase().indexOf(q) === -1 && m.name.toLowerCase().indexOf(q) === -1) return false;
@@ -1932,6 +2183,21 @@
   }
 
   function describeModel(m) {
+    var bits = [];
+    var v = intelOf(m);
+    if (v !== null) {
+      var s = "AI index " + (m.aaApprox ? "~" : "") + Math.round(v);
+      if (m.aaR && typeof m.aaR.intel === "number") s += " (" + Math.round(m.aaR.intel) + " reasoning)";
+      bits.push(s);
+      if (typeof m.aa.coding === "number") bits.push("coding " + Math.round(m.aa.coding));
+      if (typeof m.aa.math === "number") bits.push("math " + Math.round(m.aa.math));
+    }
+    var rest = describeOR(m);
+    if (rest) bits.push(rest);
+    return bits.join(" · ");
+  }
+
+  function describeOR(m) {
     var bits = [];
     var ctx = fmtContext(m.context);
     if (ctx) bits.push(ctx);
@@ -1959,6 +2225,7 @@
     if (filterProvider.value !== filters.provider) { filters.provider = ""; filterProvider.value = ""; }
     filterCapability.value = filters.capability;
     filterBudget.value = filters.budget;
+    filterIntel.value = filters.intel;
     modelFilter.value = filters.text;
   }
 
@@ -1969,14 +2236,26 @@
     parent.appendChild(opt);
   }
 
-  function rebuildProviderOptions() {
+  function fillProviderSelect(sel) {
     var counts = {};
     allModels.forEach(function (m) { counts[m.provider] = (counts[m.provider] || 0) + 1; });
     var providers = Object.keys(counts).sort(function (a, b) { return a.localeCompare(b); });
-    filterProvider.innerHTML = "";
-    addOption(filterProvider, "", "Any provider");
-    providers.forEach(function (p) { addOption(filterProvider, p, p + " (" + counts[p] + ")"); });
+    sel.innerHTML = "";
+    addOption(sel, "", "Any provider");
+    providers.forEach(function (p) { addOption(sel, p, p + " (" + counts[p] + ")"); });
+  }
+
+  function rebuildProviderOptions() {
+    fillProviderSelect(filterProvider);
     syncFilterControls();
+  }
+
+  // Intelligence bands exist only once scores are matched. A stored band that
+  // no longer has any models is dropped, as a stored provider would be.
+  function rebuildIntelOptions() {
+    var n = fillIntelSelect(filterIntel, filters.intel, allModels);
+    filterIntel.hidden = !n;
+    if (n && filterIntel.value !== filters.intel) filters.intel = "";
   }
 
   function rebuildModelOptions() {
@@ -1987,12 +2266,17 @@
       return;
     }
     var list = allModels.filter(matchesFilters);
+    if (filters.intel && aaMatched) {
+      list.sort(function (a, b) {
+        return a.provider.localeCompare(b.provider) || (intelOf(b) || 0) - (intelOf(a) || 0);
+      });
+    }
     var chosenInList = chosenModel && list.some(function (m) { return m.id === chosenModel; });
     if (chosenModel && !chosenInList) addOption(modelSelect, chosenModel, chosenModel + " (current)");
     if (!chosenModel) addOption(modelSelect, "", "Choose a model…");
 
     if (filters.provider) {
-      list.forEach(function (m) { addOption(modelSelect, m.id, m.name); });
+      list.forEach(function (m) { addOption(modelSelect, m.id, m.name + aaLabel(m)); });
     } else {
       // Group by provider so the native picker shows headers.
       var group = null, groupName = null;
@@ -2003,11 +2287,11 @@
           group.label = groupName;
           modelSelect.appendChild(group);
         }
-        addOption(group, m.id, m.name);
+        addOption(group, m.id, m.name + aaLabel(m));
       });
     }
     modelSelect.value = chosenModel;
-    var anyFilter = filters.provider || filters.capability || filters.budget || filters.text;
+    var anyFilter = filters.provider || filters.capability || filters.budget || (filters.intel && aaMatched) || filters.text;
     modelRefreshHint.textContent = anyFilter
       ? list.length + " of " + allModels.length + " models match."
       : allModels.length + " models loaded.";
@@ -2029,15 +2313,21 @@
         .sort(function (a, b) {
           return a.provider.localeCompare(b.provider) || a.name.localeCompare(b.name);
         });
+      joinAA();
       rebuildProviderOptions();
+      rebuildIntelOptions();
       rebuildModelOptions();
+      updateAAStatus();
       if (allModels.length === 0) modelRefreshHint.textContent = "OpenRouter returned no models — check your key.";
     } catch (err) {
       allModels = [];
+      joinAA();
       rebuildProviderOptions();
+      rebuildIntelOptions();
       rebuildModelOptions();
       modelRefreshHint.textContent = "Couldn't reach OpenRouter (" + err.message + "). Check your connection or key.";
     }
+    if (!browseView.hidden) renderBrowse();
   }
 
   function openSettings() {
@@ -2065,17 +2355,19 @@
     filters.provider = filterProvider.value;
     filters.capability = filterCapability.value;
     filters.budget = filterBudget.value;
+    if (!filterIntel.hidden) filters.intel = filterIntel.value;
     filters.text = modelFilter.value.trim().toLowerCase();
     persistFilters();
     rebuildModelOptions();
   }
 
   filterProvider.addEventListener("change", onFilterChange);
+  filterIntel.addEventListener("change", onFilterChange);
   filterCapability.addEventListener("change", onFilterChange);
   filterBudget.addEventListener("change", onFilterChange);
   modelFilter.addEventListener("input", onFilterChange);
   resetFiltersBtn.addEventListener("click", function () {
-    filters = { provider: "", capability: "", budget: "", text: "" };
+    filters = { provider: "", capability: "", budget: "", intel: "", text: "" };
     persistFilters();
     syncFilterControls();
     rebuildModelOptions();
@@ -2095,6 +2387,11 @@
     if (key) storageSet(KEYS.apiKey, key); else storageRemove(KEYS.apiKey);
     if (model) storageSet(KEYS.model, model); else storageRemove(KEYS.model);
     if (sys) storageSet(KEYS.systemPrompt, sys); else storageRemove(KEYS.systemPrompt);
+
+    var aaKey = aaKeyInput.value.trim();
+    var prevAaKey = storageGet(KEYS.aaKey) || "";
+    if (aaKey) storageSet(KEYS.aaKey, aaKey); else storageRemove(KEYS.aaKey);
+    if (aaKey && aaKey !== prevAaKey) refreshAA(true);
 
     chosenModel = model;
     updateModelLabel(model);
@@ -2334,6 +2631,544 @@
     }
   }
 
+  /* ---------------- Artificial Analysis scores ----------------
+     Intelligence, coding and maths indices from Artificial Analysis, fetched
+     with the user's own key, cached on the device and refreshed when more
+     than 7 days old. Their ids share nothing with OpenRouter's, so models are
+     joined by creator plus name tokens. Matching is deliberately strict: a
+     wrong score is worse than none. Near misses are accepted only when
+     unambiguous, and are flagged with "~". */
+  var AA_URL = "https://artificialanalysis.ai/api/v2/data/llms/models";
+  var AA_MAX_AGE = 7 * 24 * 60 * 60 * 1000;
+  var AA_RETRY_AFTER = 60 * 60 * 1000;
+  var aaCache = (function () {
+    var c = readJson(KEYS.aaCache, null);
+    if (c && typeof c.fetchedAt === "number" && Array.isArray(c.models)) {
+      c.models = c.models.filter(function (r) { return r && typeof r === "object" && typeof r.name === "string"; });
+      return c;
+    }
+    return null;
+  })();
+  var aaLoading = false;
+  var aaError = "";
+  var aaTiers = null;
+  var aaMatched = 0;
+
+  function aaNum(v) {
+    return typeof v === "number" && isFinite(v) ? v : null;
+  }
+
+  function normaliseAA(r) {
+    if (!r || typeof r !== "object") return null;
+    var name = typeof r.name === "string" ? r.name : "";
+    var slug = typeof r.slug === "string" ? r.slug : "";
+    if (!name && !slug) return null;
+    var creator = r.model_creator && typeof r.model_creator === "object" ? r.model_creator : {};
+    var ev = r.evaluations && typeof r.evaluations === "object" ? r.evaluations : {};
+    var evals = {};
+    Object.keys(ev).forEach(function (k) {
+      if (/^artificial_analysis_/.test(k)) return;
+      var v = aaNum(ev[k]);
+      if (v !== null) evals[k] = v;
+    });
+    return {
+      id: String(r.id || slug || name),
+      name: name || slug,
+      slug: slug,
+      creator: typeof creator.name === "string" ? creator.name : "",
+      creatorSlug: typeof creator.slug === "string" ? creator.slug : "",
+      released: typeof r.release_date === "string" ? r.release_date.slice(0, 10) : "",
+      intel: aaNum(ev.artificial_analysis_intelligence_index),
+      coding: aaNum(ev.artificial_analysis_coding_index),
+      math: aaNum(ev.artificial_analysis_math_index),
+      evals: evals,
+      tps: aaNum(r.median_output_tokens_per_second),
+      ttft: aaNum(r.median_time_to_first_token_seconds)
+    };
+  }
+
+  var AA_CREATOR_ALIAS = {
+    "meta-llama": "meta", "mistralai": "mistral", "mistral-ai": "mistral", "x-ai": "xai",
+    "qwen": "alibaba", "alibaba-cloud": "alibaba", "moonshotai": "moonshot", "moonshot-ai": "moonshot",
+    "kimi": "moonshot", "z-ai": "zai", "zhipu": "zai", "zhipu-ai": "zai", "ai21-labs": "ai21",
+    "amazon": "aws", "azure": "microsoft", "microsoft-azure": "microsoft", "nousresearch": "nous",
+    "nous-research": "nous", "ibm-granite": "ibm", "liquidai": "liquid", "liquid-ai": "liquid",
+    "bytedance-seed": "bytedance", "deepseek-ai": "deepseek", "google-deepmind": "google",
+    "cohereforai": "cohere", "cohere-for-ai": "cohere"
+  };
+
+  function canonCreator(s) {
+    s = String(s || "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+    return AA_CREATOR_ALIAS[s] || s.replace(/-/g, "");
+  }
+
+  var AA_NOISE = { instruct: 1, it: 1, chat: 1, latest: 1, hf: 1 };
+  var AA_LOOSE_DROP = { preview: 1, exp: 1, experimental: 1, beta: 1 };
+  var AA_REASONING = { thinking: 1, reasoning: 1 };
+
+  function aaTokens(s) {
+    return String(s || "").toLowerCase()
+      .replace(/non[\s_-]*reasoning/g, " ")
+      .replace(/[^a-z0-9]+/g, " ").trim().split(/\s+/)
+      .filter(function (t) { return t && !AA_NOISE[t]; });
+  }
+
+  function orTokens(id) {
+    var bare = String(id).split("/").pop();
+    var extra = [];
+    var colon = bare.indexOf(":");
+    if (colon !== -1) {
+      if (/thinking/.test(bare.slice(colon + 1))) extra.push("thinking");
+      bare = bare.slice(0, colon);
+    }
+    return aaTokens(bare).concat(extra);
+  }
+
+  function strictKey(tokens) {
+    return tokens.slice().sort().join(" ");
+  }
+
+  function looseKey(tokens) {
+    return tokens.filter(function (t) { return !AA_LOOSE_DROP[t] && !/^\d{4}$|^\d{6,8}$/.test(t); }).sort().join(" ");
+  }
+
+  function buildAAIndex(models) {
+    var idx = {};
+    function add(creator, kind, key, rec) {
+      if (!key) return;
+      var c = idx[creator] || (idx[creator] = { strict: {}, loose: {} });
+      var bucket = c[kind][key] || (c[kind][key] = []);
+      if (bucket.indexOf(rec) === -1) bucket.push(rec);
+    }
+    models.forEach(function (rec) {
+      var creator = canonCreator(rec.creatorSlug || rec.creator);
+      if (!creator) return;
+      if (rec.slug) {
+        var st = aaTokens(rec.slug);
+        add(creator, "strict", strictKey(st), rec);
+        add(creator, "loose", looseKey(st), rec);
+      }
+      if (rec.name) add(creator, "strict", strictKey(aaTokens(rec.name)), rec);
+    });
+    return idx;
+  }
+
+  function lookupAA(idx, creator, tokens) {
+    var c = idx[creator];
+    if (!c) return null;
+    var hits = c.strict[strictKey(tokens)];
+    if (hits && hits.length) {
+      var best = hits.slice().sort(function (a, b) { return (b.released || "").localeCompare(a.released || ""); })[0];
+      return { rec: best, approx: false };
+    }
+    var loose = c.loose[looseKey(tokens)];
+    if (loose && loose.length === 1) return { rec: loose[0], approx: true };
+    return null;
+  }
+
+  function joinAA() {
+    aaMatched = 0;
+    aaTiers = null;
+    allModels.forEach(function (m) { m.aa = null; m.aaR = null; m.aaApprox = false; });
+    if (!aaCache) return;
+    var scores = aaCache.models.map(function (r) { return r.intel; })
+      .filter(function (v) { return typeof v === "number"; })
+      .sort(function (a, b) { return a - b; });
+    if (scores.length) {
+      var q = function (p) { return scores[Math.floor(p * (scores.length - 1))]; };
+      aaTiers = { p30: q(0.3), p70: q(0.7), p90: q(0.9), max: scores[scores.length - 1] };
+    }
+    var idx = buildAAIndex(aaCache.models);
+    allModels.forEach(function (m) {
+      var creator = canonCreator(m.id.split("/")[0]);
+      var tokens = orTokens(m.id);
+      var base = lookupAA(idx, creator, tokens);
+      if (base) { m.aa = base.rec; m.aaApprox = base.approx; }
+      var alreadyReasoning = tokens.some(function (t) { return AA_REASONING[t]; });
+      if (!alreadyReasoning) {
+        var r = lookupAA(idx, creator, tokens.concat(["thinking"])) || lookupAA(idx, creator, tokens.concat(["reasoning"]));
+        if (r && r.rec !== m.aa) {
+          if (m.aa) m.aaR = r.rec;
+          else { m.aa = r.rec; m.aaApprox = true; }
+        }
+      }
+      if (intelOf(m) !== null) aaMatched++;
+    });
+  }
+
+  function intelOf(m) {
+    return m && m.aa && typeof m.aa.intel === "number" ? m.aa.intel : null;
+  }
+
+  function aaLabel(m) {
+    var v = intelOf(m);
+    return v === null ? "" : " · AI " + (m.aaApprox ? "~" : "") + Math.round(v);
+  }
+
+  function intelMatches(m, f) {
+    if (!f) return true;
+    var v = intelOf(m);
+    if (v === null) return false;
+    if (f === "scored") return true;
+    var b = parseInt(f.slice(1), 10);
+    var rv = Math.round(v);   // bands use the same rounding as the displayed score
+    return !isFinite(b) || (rv >= b && rv < b + 10);
+  }
+
+  function fillIntelSelect(sel, value, models) {
+    var counts = {}, scored = 0;
+    models.forEach(function (m) {
+      var v = intelOf(m);
+      if (v === null) return;
+      scored++;
+      var b = Math.floor(Math.round(v) / 10) * 10;
+      counts[b] = (counts[b] || 0) + 1;
+    });
+    var bands = Object.keys(counts).map(Number).sort(function (a, b) { return b - a; });
+    sel.innerHTML = "";
+    addOption(sel, "", "Any intelligence");
+    if (scored) addOption(sel, "scored", "Has a score (" + scored + ")");
+    bands.forEach(function (b, i) {
+      addOption(sel, "b" + b, (i === 0 ? b + "+" : b + "–" + (b + 9)) + " (" + counts[b] + ")");
+    });
+    sel.value = value || "";
+    if (sel.value !== (value || "")) sel.value = "";
+    return scored;
+  }
+
+  var AA_TIER_TEXT = {
+    frontier: ["Frontier", "top 10% of models Artificial Analysis measures", "Among the strongest measured. Suited to hard reasoning, long agentic tasks and serious coding."],
+    strong: ["Strong", "top 30% of measured models", "Solid on multi-step reasoning and coding. A safe default for most complex work."],
+    capable: ["Capable", "middle 40% of measured models", "Good for everyday chat, writing and straightforward tasks. Check its work on anything intricate."],
+    light: ["Light", "bottom 30% of measured models", "Fluent, but weak on multi-step reasoning, maths and agentic tool use. Fine for casual chat and drafting."]
+  };
+
+  function aaTier(v) {
+    if (v === null || !aaTiers) return null;
+    if (v >= aaTiers.p90) return "frontier";
+    if (v >= aaTiers.p70) return "strong";
+    if (v >= aaTiers.p30) return "capable";
+    return "light";
+  }
+
+  function fmtAgo(ts) {
+    var d = Date.now() - ts;
+    if (d < 90e3) return "just now";
+    if (d < 90 * 60e3) return Math.round(d / 60e3) + " minutes ago";
+    if (d < 36 * 3600e3) return Math.round(d / 3600e3) + " hours ago";
+    return Math.round(d / 86400e3) + " days ago";
+  }
+
+  function aaStatusText() {
+    if (aaLoading) return "Fetching scores from Artificial Analysis…";
+    var bits = [];
+    if (aaCache) {
+      bits.push("Scores for " + aaCache.models.length + " models, fetched " + fmtAgo(aaCache.fetchedAt) + ".");
+      if (allModels.length) bits.push("Matched " + aaMatched + " of " + allModels.length + " OpenRouter models.");
+    } else if (storageGet(KEYS.aaKey)) {
+      bits.push("No scores yet.");
+    }
+    if (aaError) bits.push(aaError);
+    return bits.join(" ");
+  }
+
+  function updateAAStatus() {
+    aaStatusEl.textContent = aaStatusText();
+    aaStatusEl.classList.toggle("error", !!aaError);
+    browseRefreshBtn.hidden = !storageGet(KEYS.aaKey);
+    browseRefreshBtn.disabled = aaLoading;
+    if (!browseView.hidden) renderBrowseAttrib();
+  }
+
+  async function refreshAA(force) {
+    var key = storageGet(KEYS.aaKey);
+    if (!key || aaLoading) return;
+    var now = Date.now();
+    if (!force) {
+      if (aaCache && now - aaCache.fetchedAt < AA_MAX_AGE) return;
+      var last = parseInt(storageGet(KEYS.aaAttempt) || "0", 10);
+      if (now - last < AA_RETRY_AFTER) return;
+    }
+    aaLoading = true;
+    aaError = "";
+    storageSet(KEYS.aaAttempt, String(now));
+    updateAAStatus();
+    try {
+      var res = await fetch(AA_URL, { headers: { "x-api-key": key } });
+      if (res.status === 401 || res.status === 403) throw new Error("the key was rejected (HTTP " + res.status + ").");
+      if (res.status === 429) throw new Error("rate limited. Try again later.");
+      if (!res.ok) throw new Error("HTTP " + res.status + ".");
+      var json = await res.json();
+      var raw = Array.isArray(json) ? json : (json && (json.data || json.models)) || [];
+      var models = Array.isArray(raw) ? raw.map(normaliseAA).filter(Boolean) : [];
+      if (!models.length) throw new Error("the response contained no models.");
+      aaCache = { fetchedAt: Date.now(), models: models };
+      if (!storageSet(KEYS.aaCache, JSON.stringify(aaCache))) {
+        aaError = "Scores loaded but couldn't be saved on this device (storage full).";
+      }
+    } catch (e) {
+      aaError = e && e.name === "TypeError"
+        ? "Couldn't reach Artificial Analysis from this browser. You may be offline, or their API may not accept requests from web pages."
+        : "Artificial Analysis: " + (e && e.message ? e.message : "request failed.");
+    } finally {
+      aaLoading = false;
+    }
+    joinAA();
+    rebuildIntelOptions();
+    rebuildModelOptions();
+    updateAAStatus();
+    if (!browseView.hidden) { rebuildBrowseControls(); renderBrowse(); }
+  }
+
+  /* ---------------- Model browser ----------------
+     A full-screen page for looking through the catalogue by capability.
+     Everything comes from the cached OpenRouter list and scores. */
+  var browse = { limit: 60 };
+  var AA_BENCH_LABELS = {
+    mmlu_pro: "MMLU-Pro", gpqa: "GPQA Diamond", hle: "Humanity's Last Exam", livecodebench: "LiveCodeBench",
+    scicode: "SciCode", math_500: "MATH-500", aime: "AIME 2024", aime_25: "AIME 2025", ifbench: "IFBench",
+    lcr: "Long-context reasoning", terminalbench_hard: "Terminal-Bench Hard", tau2: "τ²-Bench"
+  };
+
+  function el(tag, cls, text) {
+    var e = document.createElement(tag);
+    if (cls) e.className = cls;
+    if (text !== undefined && text !== null) e.textContent = String(text);
+    return e;
+  }
+
+  function openBrowse() {
+    if (!browseView.hidden) return;
+    browseView.hidden = false;
+    browse.limit = 60;
+    rebuildBrowseControls();
+    if (!browseSort.dataset.touched) browseSort.value = aaMatched ? "intel" : "name";
+    renderBrowse();
+    browseView.scrollTop = 0;
+    // window.history: inside this closure "history" is the chat's message list.
+    try { window.history.pushState({ orcBrowse: true }, ""); } catch (e) { /* ignore */ }
+    if (!allModels.length) fetchModels(storageGet(KEYS.apiKey));
+  }
+
+  function hideBrowse() {
+    browseView.hidden = true;
+  }
+
+  function closeBrowse() {
+    if (window.history.state && window.history.state.orcBrowse) window.history.back();
+    else hideBrowse();
+  }
+
+  function rebuildBrowseControls() {
+    var pv = browseProvider.value;
+    fillProviderSelect(browseProvider);
+    browseProvider.value = pv;
+    if (browseProvider.value !== pv) browseProvider.value = "";
+    browseIntel.hidden = !fillIntelSelect(browseIntel, browseIntel.value, allModels);
+    var needsScores = { intel: 1, coding: 1, math: 1, speed: 1 };
+    for (var i = 0; i < browseSort.options.length; i++) {
+      var o = browseSort.options[i];
+      if (needsScores[o.value]) o.disabled = !aaMatched;
+    }
+    if (browseSort.selectedOptions[0] && browseSort.selectedOptions[0].disabled) browseSort.value = "name";
+  }
+
+  function browseValue(m, key) {
+    switch (key) {
+      case "intel": return intelOf(m);
+      case "coding": return m.aa ? m.aa.coding : null;
+      case "math": return m.aa ? m.aa.math : null;
+      case "speed": return m.aa ? m.aa.tps : null;
+      case "price": return m.free ? 0 : m.outPrice;
+      case "context": return m.context;
+      case "newest": return m.created;
+    }
+    return null;
+  }
+
+  function sortBrowse(list, key) {
+    if (key === "name") return list.sort(function (a, b) { return a.name.localeCompare(b.name); });
+    var ascending = key === "price";
+    return list.sort(function (a, b) {
+      var va = browseValue(a, key), vb = browseValue(b, key);
+      var na = typeof va !== "number", nb = typeof vb !== "number";
+      if (na || nb) return na === nb ? a.name.localeCompare(b.name) : (na ? 1 : -1);
+      if (va !== vb) return ascending ? va - vb : vb - va;
+      return a.name.localeCompare(b.name);
+    });
+  }
+
+  function browseMatches(m) {
+    if (browseProvider.value && m.provider !== browseProvider.value) return false;
+    var cap = browseCap.value;
+    if (cap === "vision" && !m.vision) return false;
+    if (cap === "reasoning" && !m.reasoning) return false;
+    if (cap === "tools" && !m.tools) return false;
+    if (cap === "free" && !m.free) return false;
+    if (!browseIntel.hidden && browseIntel.value && !intelMatches(m, browseIntel.value)) return false;
+    var q = browseSearch.value.trim().toLowerCase();
+    if (q && m.id.toLowerCase().indexOf(q) === -1 && m.name.toLowerCase().indexOf(q) === -1 &&
+        !(m.aa && m.aa.name.toLowerCase().indexOf(q) !== -1)) return false;
+    return true;
+  }
+
+  function addStat(grid, label, value) {
+    if (value === null || value === undefined) return;
+    var s = el("div", "stat");
+    s.appendChild(el("b", null, value));
+    s.appendChild(el("span", null, label));
+    grid.appendChild(s);
+  }
+
+  function fmtBench(v) {
+    return v <= 1 ? (v * 100).toFixed(1) + "%" : String(Math.round(v * 10) / 10);
+  }
+
+  function fillDetail(box, m) {
+    box.appendChild(el("div", "mono-id", m.id));
+    if (m.aa) {
+      var t = AA_TIER_TEXT[aaTier(intelOf(m))];
+      if (t) {
+        box.appendChild(el("div", "tier-line", t[0] + " · " + t[1]));
+        box.appendChild(el("div", "gloss", t[2]));
+      }
+      var grid = el("div", "stat-grid");
+      var r = function (v) { return typeof v === "number" ? Math.round(v) : null; };
+      addStat(grid, "Intelligence", r(m.aa.intel));
+      addStat(grid, "Reasoning mode", m.aaR ? r(m.aaR.intel) : null);
+      addStat(grid, "Coding", r(m.aa.coding));
+      addStat(grid, "Maths", r(m.aa.math));
+      addStat(grid, "Median speed", typeof m.aa.tps === "number" ? Math.round(m.aa.tps) + " tok/s" : null);
+      addStat(grid, "First token", typeof m.aa.ttft === "number" ? m.aa.ttft.toFixed(1) + "s" : null);
+      box.appendChild(grid);
+      var evals = m.aa.evals || {};
+      Object.keys(evals).forEach(function (k) {
+        var row = el("div", "bench");
+        row.appendChild(el("span", null, AA_BENCH_LABELS[k] || k.replace(/_/g, " ")));
+        row.appendChild(el("span", null, fmtBench(evals[k])));
+        box.appendChild(row);
+      });
+      box.appendChild(el("div", "note", "Artificial Analysis entry: " + m.aa.name +
+        (m.aa.released ? ", released " + m.aa.released : "") +
+        (m.aaApprox ? ". Matched approximately, so check the name." : ".")));
+    } else {
+      box.appendChild(el("div", "note", aaCache
+        ? "No Artificial Analysis score matched this model. It may not be benchmarked, or the names differ too much to match safely."
+        : "Add an Artificial Analysis key in settings to see intelligence scores."));
+    }
+    var orDesc = describeOR(m);
+    if (orDesc) box.appendChild(el("div", "note", "OpenRouter: " + orDesc));
+    var current = m.id === (storageGet(KEYS.model) || "");   // the saved model, not an unsaved pick in settings
+    var use = el("button", "btn primary", current ? "Current model" : "Use this model");
+    use.type = "button";
+    use.disabled = current;
+    use.addEventListener("click", function () { useModel(m.id); });
+    box.appendChild(use);
+  }
+
+  function buildCard(m) {
+    var v = intelOf(m);
+    var tier = aaTier(v);
+    var card = el("div", "mcard" + (m.id === (storageGet(KEYS.model) || "") ? " current" : ""));
+    card.setAttribute("data-id", m.id);
+    var main = el("button", "mcard-main");
+    main.type = "button";
+    var top = el("div", "mcard-top");
+    top.appendChild(el("span", "mcard-name", m.name));
+    top.appendChild(el("span", "score" + (tier ? " tier-" + tier : ""), v === null ? "–" : (m.aaApprox ? "~" : "") + Math.round(v)));
+    main.appendChild(top);
+    var sub = [];
+    if (m.free) sub.push("free");
+    else if (m.outPrice !== null) sub.push(fmtPrice(m.inPrice) + " / " + fmtPrice(m.outPrice) + " per 1M");
+    var ctx = fmtContext(m.context);
+    if (ctx) sub.push(ctx);
+    if (m.vision) sub.push("vision");
+    if (m.reasoning) sub.push("reasoning");
+    if (m.tools) sub.push("tools");
+    main.appendChild(el("div", "mcard-sub", sub.join(" · ")));
+    if (v !== null && aaTiers && aaTiers.max > 0) {
+      var bar = el("div", "mbar");
+      var fill = el("span");
+      fill.style.width = Math.max(2, Math.min(100, v / aaTiers.max * 100)) + "%";
+      bar.appendChild(fill);
+      main.appendChild(bar);
+    }
+    var detail = el("div", "mcard-detail");
+    detail.hidden = true;
+    main.addEventListener("click", function () {
+      if (detail.hidden && !detail.childNodes.length) fillDetail(detail, m);
+      detail.hidden = !detail.hidden;
+    });
+    card.appendChild(main);
+    card.appendChild(detail);
+    return card;
+  }
+
+  function renderBrowseAttrib() {
+    browseAttrib.innerHTML = "";
+    if (aaCache) {
+      browseAttrib.appendChild(document.createTextNode("Intelligence, coding and maths indices, speeds and benchmark results from "));
+      var a = el("a", null, "Artificial Analysis");
+      a.href = "https://artificialanalysis.ai/";
+      a.target = "_blank";
+      a.rel = "noopener noreferrer";
+      browseAttrib.appendChild(a);
+      browseAttrib.appendChild(document.createTextNode(", fetched " + fmtAgo(aaCache.fetchedAt) +
+        ". Models are matched to OpenRouter by creator and name, so a few may be missed; \"~\" marks an approximate match. Tiers are relative to every model Artificial Analysis measures."));
+    } else {
+      browseAttrib.textContent = "Add a free Artificial Analysis API key in settings to see intelligence scores here.";
+    }
+    if (aaLoading) browseAttrib.appendChild(el("div", null, "Fetching scores…"));
+    if (aaError) browseAttrib.appendChild(el("div", "error-text", aaError));
+  }
+
+  function renderBrowse() {
+    browseList.innerHTML = "";
+    renderBrowseAttrib();
+    if (!allModels.length) {
+      browseStatus.textContent = "Loading models…";
+      return;
+    }
+    var list = sortBrowse(allModels.filter(browseMatches), browseSort.value);
+    list.slice(0, browse.limit).forEach(function (m) { browseList.appendChild(buildCard(m)); });
+    if (list.length > browse.limit) {
+      var more = el("button", "btn", "Show more (" + (list.length - browse.limit) + " left)");
+      more.type = "button";
+      more.id = "browse-more";
+      more.addEventListener("click", function () { browse.limit += 60; renderBrowse(); });
+      browseList.appendChild(more);
+    }
+    browseStatus.textContent = list.length + " of " + allModels.length + " models" +
+      (aaMatched ? " · " + aaMatched + " with scores" : "");
+  }
+
+  function useModel(id) {
+    chosenModel = id;
+    storageSet(KEYS.model, id);
+    updateModelLabel(id);
+    updateComposerEnabled();
+    rebuildModelOptions();
+    renderProfileControls();
+    closeBrowse();
+  }
+
+  function onBrowseControl() {
+    browse.limit = 60;
+    renderBrowse();
+  }
+
+  browseOpenBtn.addEventListener("click", openBrowse);
+  browseCloseBtn.addEventListener("click", closeBrowse);
+  browseRefreshBtn.addEventListener("click", function () { refreshAA(true); });
+  browseSearch.addEventListener("input", onBrowseControl);
+  browseSort.addEventListener("change", function () { browseSort.dataset.touched = "1"; onBrowseControl(); });
+  browseIntel.addEventListener("change", onBrowseControl);
+  browseProvider.addEventListener("change", onBrowseControl);
+  browseCap.addEventListener("change", onBrowseControl);
+  window.addEventListener("popstate", function () {
+    if (!browseView.hidden) hideBrowse();
+  });
+
   /* ---------------- Storage status banner ---------------- */
   function updateStorageStatus() {
     storageStatus.textContent = usingMemoryFallback
@@ -2354,8 +3189,10 @@
   renderHistory();
   updateComposerEnabled();
   updateStorageStatus();
+  updateAAStatus();
   var savedKeyOnLoad = storageGet(KEYS.apiKey);
   if (savedKeyOnLoad) fetchModels(savedKeyOnLoad);
+  refreshAA(false);
 })();
 </script>
 </body>

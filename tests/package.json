@@ -1,0 +1,11 @@
+{
+  "name": "openrouter-chat-tests",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node e2e.mjs"
+  },
+  "devDependencies": {
+    "playwright": "^1.55.0"
+  }
+}
