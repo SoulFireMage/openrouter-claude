@@ -46,6 +46,13 @@ const fakeFetch = () => {
       evaluations: { artificial_analysis_intelligence_index: 13.4 } },
     { id: "aa-8", name: "Impostor Sonnet", slug: "claude-4-sonnet", model_creator: { name: "Someone Else", slug: "someone-else" },
       evaluations: { artificial_analysis_intelligence_index: 99 } },
+    // Newer entries that used to collide with the base names above: "+" was
+    // stripped and "non-reasoning" was dropped. They carry no index, so the
+    // tier percentiles are unchanged, but a wrong match would lose the score.
+    { id: "aa-9", name: "Claude 4 Sonnet (Non-reasoning)", slug: "claude-4-sonnet-non-reasoning", release_date: "2025-06-01",
+      model_creator: { name: "Anthropic", slug: "anthropic" }, evaluations: { artificial_analysis_coding_index: 1 } },
+    { id: "aa-10", name: "GPT-4o mini+", slug: "gpt-4o-mini-plus", release_date: "2025-06-01",
+      model_creator: { name: "OpenAI", slug: "openai" }, evaluations: {} },
     { junk: true }, null
   ] };
   window.fetch = async (url, opts = {}) => {
@@ -590,6 +597,8 @@ check("aa: picker labels carry scores; creator decoy and gpt-4o decoy ignored",
   aaLabels.includes("Anthropic: Claude Sonnet 4 · AI 44") && aaLabels.includes("OpenAI: GPT-4o mini · AI 21") &&
   aaLabels.includes("Google: Gemma 3 4B · AI 12") && aaLabels.includes("Meta: Llama 3 8B (free) · AI 10") &&
   aaLabels.includes("Auto Router") && !aaLabels.some(l => / 99| 30$/.test(l)), JSON.stringify(aaLabels));
+check("aa: '+' and non-reasoning variants don't steal the base match",
+  aaLabels.includes("Anthropic: Claude Sonnet 4 · AI 44") && aaLabels.includes("OpenAI: GPT-4o mini · AI 21"), JSON.stringify(aaLabels));
 const optVals = () => page.$$eval("#model-select option", os => os.filter(o => o.value && !o.textContent.endsWith("(current)")).map(o => o.value));
 await page.selectOption("#filter-intel", "b40");
 check("aa: band 40+", JSON.stringify(await optVals()) === JSON.stringify(["anthropic/claude-sonnet-4"]), JSON.stringify(await optVals()));

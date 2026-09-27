@@ -80,6 +80,9 @@ multi-step reasoning or agentic work. To help tell them apart, the app shows
   models simply show no score; settings reports how many matched.
 - Where Artificial Analysis benchmarks a separate thinking or reasoning
   variant, its score is shown alongside, e.g. "AI index 44 (59 reasoning)".
+- Where Artificial Analysis lists several effort levels for one model, the
+  headline entry (usually its highest effort) is used. The briefing card
+  names the exact entry, e.g. "GPT-6 Sol (max)".
 - The picker's intelligence filter uses 10-point bands built from the data.
   The model browser (the bar-chart button in the header) sorts and filters by
   intelligence, coding, maths, price, speed, context or age. Its tiers
