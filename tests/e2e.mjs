@@ -63,6 +63,7 @@ const fakeFetch = () => {
       const mode = localStorage.getItem("__aaMode") || "404";
       if (mode === "404") return new Response("Not found", { status: 404 });
       if (mode === "bad") return new Response("{not json", { status: 200 });
+      if (mode === "empty") return new Response(JSON.stringify({ fetchedAt: new Date().toISOString(), data: [] }), { status: 200 });
       return new Response(JSON.stringify({ source: "Artificial Analysis", fetchedAt: new Date(Date.now() - 2 * 86400000).toISOString(), data: window.__aaFixture.data }),
         { status: 200, headers: { "Content-Type": "application/json" } });
     }
@@ -585,6 +586,13 @@ await page.click("#open-settings");
 check("aa: unreadable file reported, no scores", /Couldn't load intelligence scores/.test(await page.textContent("#aa-status")) && await page.$eval("#filter-intel", e => e.hidden), await page.textContent("#aa-status"));
 await page.click("#save-settings");
 
+await page.evaluate(() => localStorage.setItem("__aaMode", "empty"));
+await page.reload({ waitUntil: "load" });
+await page.waitForTimeout(400);
+await page.click("#open-settings");
+check("aa: empty published file reported, not silent", /no usable models/.test(await page.textContent("#aa-status")) && await page.$eval("#filter-intel", e => e.hidden), await page.textContent("#aa-status"));
+await page.click("#save-settings");
+
 await page.evaluate(() => localStorage.setItem("__aaMode", "ok"));
 await page.reload({ waitUntil: "load" });
 await page.click("#open-settings");
@@ -636,7 +644,9 @@ const pills = await page.$$eval("#browse-list .mcard .score", ss => ss.map(s => 
 check("browse: tier pills from percentiles", pills[0] === "score tier-strong|44" && pills[1] === "score tier-capable|21" && pills[2] === "score tier-light|12" && pills[4] === "score|–", JSON.stringify(pills));
 check("browse: status line", (await page.textContent("#browse-status")) === "6 of 6 models · 4 with scores", await page.textContent("#browse-status"));
 check("browse: attribution link", await page.$eval("#browse-attrib a", a => a.href === "https://artificialanalysis.ai/" && a.target === "_blank"));
+check("browse: cards start collapsed for screen readers", await page.$eval("#browse-list .mcard:nth-child(1) .mcard-main", b => b.getAttribute("aria-expanded") === "false"));
 await page.click("#browse-list .mcard:nth-child(1) .mcard-main");
+check("browse: expanded card says so", await page.$eval("#browse-list .mcard:nth-child(1) .mcard-main", b => b.getAttribute("aria-expanded") === "true"));
 const brief = await page.$eval("#browse-list .mcard:nth-child(1) .mcard-detail", d => d.textContent);
 check("browse: briefing card", brief.includes("Strong · top 30%") && brief.includes("Reasoning mode") && brief.includes("GPQA Diamond") && brief.includes("68.3%") && brief.includes("55 tok/s") && brief.includes("Artificial Analysis entry: Claude 4 Sonnet, released 2025-05-22.") && brief.includes("Current model"), brief);
 await page.click("#browse-list .mcard:nth-child(2) .mcard-main");
