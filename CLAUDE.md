@@ -13,9 +13,15 @@ phone, so every change ships as a PR that is merged to `main`, which deploys.
   change to a shell file**, or installed copies keep the old version.
 - `vendor/` holds marked, DOMPurify and KaTeX (fonts as woff2), vendored so
   nothing loads from a CDN. The service worker's file list must match it.
-- API keys (OpenRouter, Artificial Analysis) are typed into settings and live
-  only in `localStorage`. The repo is public: never commit a key, never put
-  one in code, tests or commit messages.
+- The OpenRouter key is typed into settings and lives only in `localStorage`.
+  The repo is public: never commit a key, never put one in code, tests or
+  commit messages.
+- Intelligence scores come from Artificial Analysis, whose API refuses
+  browser requests. `.github/workflows/aa-scores.yml` runs
+  `.github/scripts/fetch-aa-scores.mjs` daily with the repository secret
+  `AA_API_KEY`, refetches when the published data is over 7 days old, and
+  commits `data/aa-models.json`, which the app reads from its own site.
+  Don't reintroduce a browser-side key.
 
 ## Things that bite
 
@@ -33,9 +39,9 @@ phone, so every change ships as a PR that is merged to `main`, which deploys.
 
 `orc_api_key`, `orc_model`, `orc_system_prompt`, `orc_filters`,
 `orc_chats` (index) and `orc_chat_<id>` (messages), `orc_current_chat`,
-`orc_profiles`, `orc_active_profile`, `orc_aa_key`, `orc_aa_cache`,
-`orc_aa_attempt`. The legacy single-thread key `orc_history` is migrated
-into a chat on load.
+`orc_profiles`, `orc_active_profile`. Legacy keys cleaned up on load:
+`orc_history` (migrated into a chat) and `orc_aa_key`, `orc_aa_cache`,
+`orc_aa_attempt` (from the abandoned per-device Artificial Analysis key).
 
 ## Testing
 
@@ -43,7 +49,9 @@ into a chat on load.
 Analysis inside the page. Serve the repo on port 8765 and run it; see
 `tests/README.md`. Add checks for every behaviour change and keep it green.
 The cloud sandbox cannot reach openrouter.ai or artificialanalysis.ai, so
-the mocks are the only verification available there.
+the mocks are the only verification available there. The scores Action can
+be triggered and its logs read through the GitHub tools; it logs the
+response's field names (never the key) to make shape changes easy to spot.
 
 ## Workflow
 

@@ -858,6 +858,9 @@
     <h1 id="chat-title">New chat</h1>
     <div class="model-name" id="current-model-label">No model selected</div>
   </div>
+  <button class="icon-btn" id="open-browse" aria-label="Browse models">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 20h18"/><rect x="5" y="12" width="3" height="5"/><rect x="10.5" y="8" width="3" height="9"/><rect x="16" y="4" width="3" height="13"/></svg>
+  </button>
   <button class="icon-btn" id="open-settings" aria-label="Settings">
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
   </button>
@@ -879,7 +882,6 @@
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg>
     </button>
     <h2>Models</h2>
-    <button type="button" class="link-btn" id="browse-refresh" hidden>Refresh scores</button>
   </div>
   <div class="browse-controls">
     <input type="search" id="browse-search" placeholder="Search name or id…" autocomplete="off" autocapitalize="off" spellcheck="false">
@@ -939,13 +941,6 @@
     </div>
 
     <div class="field">
-      <label for="aa-key">Artificial Analysis API key (optional)</label>
-      <input type="password" id="aa-key" placeholder="aa_…" autocomplete="off" autocapitalize="off" spellcheck="false">
-      <div class="hint">Adds intelligence scores to the model list. Free key at <a href="https://artificialanalysis.ai/" target="_blank" rel="noopener">artificialanalysis.ai</a>. Stored only on this device; scores refresh weekly.</div>
-      <div class="hint" id="aa-status"></div>
-    </div>
-
-    <div class="field">
       <label for="profile-select">Profile</label>
       <select id="profile-select">
         <option value="">No profile</option>
@@ -1002,6 +997,7 @@
       </select>
       <div class="hint" id="model-refresh-hint">Models load automatically once a key is saved.</div>
       <div class="hint" id="model-info"></div>
+      <div class="hint" id="aa-status"></div>
       <div class="model-links">
         <button type="button" class="link-btn" id="browse-open">Browse &amp; compare models</button>
         <button type="button" class="link-btn" id="reset-filters">Reset filters</button>
@@ -1089,9 +1085,8 @@
     filters: "orc_filters",
     profiles: "orc_profiles",
     activeProfile: "orc_active_profile",
-    aaKey: "orc_aa_key",
-    aaCache: "orc_aa_cache",
-    aaAttempt: "orc_aa_attempt"
+    // Left over from the per-device Artificial Analysis key; removed on load.
+    legacyAA: ["orc_aa_key", "orc_aa_cache", "orc_aa_attempt"]
   };
 
   /* ---------------- State ----------------
@@ -1205,12 +1200,11 @@
   var filterCapability = document.getElementById("filter-capability");
   var filterBudget = document.getElementById("filter-budget");
   var filterIntel = document.getElementById("filter-intel");
-  var aaKeyInput = document.getElementById("aa-key");
   var aaStatusEl = document.getElementById("aa-status");
   var browseOpenBtn = document.getElementById("browse-open");
+  var headerBrowseBtn = document.getElementById("open-browse");
   var browseView = document.getElementById("browse-view");
   var browseCloseBtn = document.getElementById("browse-close");
-  var browseRefreshBtn = document.getElementById("browse-refresh");
   var browseSearch = document.getElementById("browse-search");
   var browseSort = document.getElementById("browse-sort");
   var browseIntel = document.getElementById("browse-intel");
@@ -2103,7 +2097,6 @@
 
   function loadSettingsIntoForm() {
     apiKeyInput.value = storageGet(KEYS.apiKey) || "";
-    aaKeyInput.value = storageGet(KEYS.aaKey) || "";
     updateAAStatus();
     systemPromptInput.value = storageGet(KEYS.systemPrompt) || "";
     chosenModel = storageGet(KEYS.model) || "";
@@ -2388,11 +2381,6 @@
     if (model) storageSet(KEYS.model, model); else storageRemove(KEYS.model);
     if (sys) storageSet(KEYS.systemPrompt, sys); else storageRemove(KEYS.systemPrompt);
 
-    var aaKey = aaKeyInput.value.trim();
-    var prevAaKey = storageGet(KEYS.aaKey) || "";
-    if (aaKey) storageSet(KEYS.aaKey, aaKey); else storageRemove(KEYS.aaKey);
-    if (aaKey && aaKey !== prevAaKey) refreshAA(true);
-
     chosenModel = model;
     updateModelLabel(model);
     updateComposerEnabled();
@@ -2632,23 +2620,17 @@
   }
 
   /* ---------------- Artificial Analysis scores ----------------
-     Intelligence, coding and maths indices from Artificial Analysis, fetched
-     with the user's own key, cached on the device and refreshed when more
-     than 7 days old. Their ids share nothing with OpenRouter's, so models are
-     joined by creator plus name tokens. Matching is deliberately strict: a
-     wrong score is worse than none. Near misses are accepted only when
-     unambiguous, and are flagged with "~". */
-  var AA_URL = "https://artificialanalysis.ai/api/v2/data/llms/models";
-  var AA_MAX_AGE = 7 * 24 * 60 * 60 * 1000;
-  var AA_RETRY_AFTER = 60 * 60 * 1000;
-  var aaCache = (function () {
-    var c = readJson(KEYS.aaCache, null);
-    if (c && typeof c.fetchedAt === "number" && Array.isArray(c.models)) {
-      c.models = c.models.filter(function (r) { return r && typeof r === "object" && typeof r.name === "string"; });
-      return c;
-    }
-    return null;
-  })();
+     Intelligence, coding and maths indices from Artificial Analysis. Their API
+     refuses requests from web pages, so a scheduled GitHub Action
+     (.github/workflows/aa-scores.yml) fetches it with a repository secret and
+     publishes data/aa-models.json on this site, refreshed when over 7 days
+     old. The app just reads that file; the service worker caches it offline.
+     Their ids share nothing with OpenRouter's, so models are joined by
+     creator plus name tokens. Matching is deliberately strict: a wrong score
+     is worse than none. Near misses are accepted only when unambiguous, and
+     are flagged with "~". */
+  var AA_FILE = "data/aa-models.json";
+  var aaCache = null;     // { fetchedAt: ms or null, models: [normalised] }
   var aaLoading = false;
   var aaError = "";
   var aaTiers = null;
@@ -2859,14 +2841,17 @@
     return Math.round(d / 86400e3) + " days ago";
   }
 
+  function aaUpdated() {
+    return aaCache && aaCache.fetchedAt ? "updated " + fmtAgo(aaCache.fetchedAt) : "";
+  }
+
   function aaStatusText() {
-    if (aaLoading) return "Fetching scores from Artificial Analysis…";
+    if (aaLoading) return "Loading intelligence scores…";
     var bits = [];
     if (aaCache) {
-      bits.push("Scores for " + aaCache.models.length + " models, fetched " + fmtAgo(aaCache.fetchedAt) + ".");
-      if (allModels.length) bits.push("Matched " + aaMatched + " of " + allModels.length + " OpenRouter models.");
-    } else if (storageGet(KEYS.aaKey)) {
-      bits.push("No scores yet.");
+      var when = aaUpdated();
+      bits.push("Intelligence scores from Artificial Analysis" + (when ? ", " + when : "") + ".");
+      if (allModels.length) bits.push("Matched " + aaMatched + " of " + allModels.length + " models.");
     }
     if (aaError) bits.push(aaError);
     return bits.join(" ");
@@ -2875,41 +2860,30 @@
   function updateAAStatus() {
     aaStatusEl.textContent = aaStatusText();
     aaStatusEl.classList.toggle("error", !!aaError);
-    browseRefreshBtn.hidden = !storageGet(KEYS.aaKey);
-    browseRefreshBtn.disabled = aaLoading;
+    aaStatusEl.hidden = !aaStatusEl.textContent;
     if (!browseView.hidden) renderBrowseAttrib();
   }
 
-  async function refreshAA(force) {
-    var key = storageGet(KEYS.aaKey);
-    if (!key || aaLoading) return;
-    var now = Date.now();
-    if (!force) {
-      if (aaCache && now - aaCache.fetchedAt < AA_MAX_AGE) return;
-      var last = parseInt(storageGet(KEYS.aaAttempt) || "0", 10);
-      if (now - last < AA_RETRY_AFTER) return;
-    }
+  async function loadAAScores() {
     aaLoading = true;
-    aaError = "";
-    storageSet(KEYS.aaAttempt, String(now));
     updateAAStatus();
     try {
-      var res = await fetch(AA_URL, { headers: { "x-api-key": key } });
-      if (res.status === 401 || res.status === 403) throw new Error("the key was rejected (HTTP " + res.status + ").");
-      if (res.status === 429) throw new Error("rate limited. Try again later.");
-      if (!res.ok) throw new Error("HTTP " + res.status + ".");
-      var json = await res.json();
-      var raw = Array.isArray(json) ? json : (json && (json.data || json.models)) || [];
-      var models = Array.isArray(raw) ? raw.map(normaliseAA).filter(Boolean) : [];
-      if (!models.length) throw new Error("the response contained no models.");
-      aaCache = { fetchedAt: Date.now(), models: models };
-      if (!storageSet(KEYS.aaCache, JSON.stringify(aaCache))) {
-        aaError = "Scores loaded but couldn't be saved on this device (storage full).";
+      var res = await fetch(AA_FILE, { cache: "no-cache" });
+      if (res.status === 404) {
+        aaCache = null;          // not published yet: no scores, and no error
+        aaError = "";
+      } else if (!res.ok) {
+        throw new Error("HTTP " + res.status);
+      } else {
+        var json = await res.json();
+        var raw = json && Array.isArray(json.data) ? json.data : [];
+        var models = raw.map(normaliseAA).filter(Boolean);
+        var fetchedAt = json && typeof json.fetchedAt === "string" ? Date.parse(json.fetchedAt) : NaN;
+        aaCache = models.length ? { fetchedAt: isFinite(fetchedAt) ? fetchedAt : null, models: models } : null;
+        aaError = "";
       }
     } catch (e) {
-      aaError = e && e.name === "TypeError"
-        ? "Couldn't reach Artificial Analysis from this browser. You may be offline, or their API may not accept requests from web pages."
-        : "Artificial Analysis: " + (e && e.message ? e.message : "request failed.");
+      aaError = "Couldn't load intelligence scores (" + (e && e.message ? e.message : "unknown error") + ").";
     } finally {
       aaLoading = false;
     }
@@ -3054,7 +3028,7 @@
     } else {
       box.appendChild(el("div", "note", aaCache
         ? "No Artificial Analysis score matched this model. It may not be benchmarked, or the names differ too much to match safely."
-        : "Add an Artificial Analysis key in settings to see intelligence scores."));
+        : "Intelligence scores aren't available at the moment."));
     }
     var orDesc = describeOR(m);
     if (orDesc) box.appendChild(el("div", "note", "OpenRouter: " + orDesc));
@@ -3113,12 +3087,12 @@
       a.target = "_blank";
       a.rel = "noopener noreferrer";
       browseAttrib.appendChild(a);
-      browseAttrib.appendChild(document.createTextNode(", fetched " + fmtAgo(aaCache.fetchedAt) +
+      var when = aaUpdated();
+      browseAttrib.appendChild(document.createTextNode((when ? ", " + when : "") +
         ". Models are matched to OpenRouter by creator and name, so a few may be missed; \"~\" marks an approximate match. Tiers are relative to every model Artificial Analysis measures."));
     } else {
-      browseAttrib.textContent = "Add a free Artificial Analysis API key in settings to see intelligence scores here.";
+      browseAttrib.textContent = aaLoading ? "Loading intelligence scores…" : "Intelligence scores aren't available at the moment.";
     }
-    if (aaLoading) browseAttrib.appendChild(el("div", null, "Fetching scores…"));
     if (aaError) browseAttrib.appendChild(el("div", "error-text", aaError));
   }
 
@@ -3158,8 +3132,8 @@
   }
 
   browseOpenBtn.addEventListener("click", openBrowse);
+  headerBrowseBtn.addEventListener("click", openBrowse);
   browseCloseBtn.addEventListener("click", closeBrowse);
-  browseRefreshBtn.addEventListener("click", function () { refreshAA(true); });
   browseSearch.addEventListener("input", onBrowseControl);
   browseSort.addEventListener("change", function () { browseSort.dataset.touched = "1"; onBrowseControl(); });
   browseIntel.addEventListener("change", onBrowseControl);
@@ -3189,10 +3163,11 @@
   renderHistory();
   updateComposerEnabled();
   updateStorageStatus();
+  KEYS.legacyAA.forEach(storageRemove);
   updateAAStatus();
   var savedKeyOnLoad = storageGet(KEYS.apiKey);
   if (savedKeyOnLoad) fetchModels(savedKeyOnLoad);
-  refreshAA(false);
+  loadAAScores();
 })();
 </script>
 </body>

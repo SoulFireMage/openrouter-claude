@@ -1,0 +1,64 @@
+# Publishes Artificial Analysis model scores as data/aa-models.json for the app.
+#
+# Needs one repository secret, AA_API_KEY (Settings > Secrets and variables >
+# Actions). Without it every run skips with a warning and changes nothing.
+#
+# Runs daily but only fetches when the published scores are more than 7 days
+# old, so a newly added key takes effect within a day. "Run workflow" on the
+# Actions tab forces an immediate refresh.
+name: Refresh intelligence scores
+
+on:
+  schedule:
+    - cron: "23 5 * * *"
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/aa-scores.yml
+      - .github/scripts/fetch-aa-scores.mjs
+
+permissions:
+  contents: write
+  pages: write
+
+concurrency:
+  group: aa-scores
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Fetch scores
+        env:
+          AA_API_KEY: ${{ secrets.AA_API_KEY }}
+          FORCE: ${{ github.event_name == 'workflow_dispatch' }}
+        run: node .github/scripts/fetch-aa-scores.mjs
+
+      - name: Commit if changed
+        id: commit
+        run: |
+          if [ -z "$(git status --porcelain -- data/aa-models.json)" ]; then
+            echo "No change to publish."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/aa-models.json
+          git commit -m "Refresh intelligence scores from Artificial Analysis"
+          git push
+          echo "pushed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Request a Pages build
+        if: steps.commit.outputs.pushed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api -X POST "repos/${{ github.repository }}/pages/builds" || echo "Pages build request failed; the next push will publish the update."
