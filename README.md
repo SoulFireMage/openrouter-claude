@@ -37,10 +37,11 @@ just static files.
 - Model picker with provider, capability (vision, reasoning, tools),
   intelligence and budget filters plus text search, grouped by provider, with
   context window and per-million-token pricing shown for the selected model.
-- Optional intelligence scores from Artificial Analysis (see below): each
-  model in the picker shows its index, and a **Browse & compare models** page
-  sorts and filters the whole catalogue by intelligence, coding, maths, price,
-  speed, context or age, with a briefing card per model.
+- Intelligence scores from Artificial Analysis (see below): each model in the
+  picker shows its index, and a model browser, opened from the bar-chart
+  button in the header, sorts and filters the whole catalogue by
+  intelligence, coding, maths, price, speed, context or age, with a briefing
+  card per model.
 - Per-reply footer showing the model and provider that served it, token
   counts and cost as reported by OpenRouter, time to first token, and
   generation speed in tokens per second.
@@ -56,14 +57,22 @@ just static files.
 ## Model intelligence scores
 
 Hundreds of models sound fluent in conversation; far fewer hold up on
-multi-step reasoning or agentic work. To help tell them apart, the app can
-show [Artificial Analysis](https://artificialanalysis.ai/) scores.
+multi-step reasoning or agentic work. To help tell them apart, the app shows
+[Artificial Analysis](https://artificialanalysis.ai/) scores.
 
-- Add a free Artificial Analysis API key in settings. Like the OpenRouter key,
-  it is stored only on the device and never committed or exported.
-- Scores are fetched once, cached on the device, and refetched when the cache
-  is more than 7 days old. After a failed fetch the app waits an hour before
-  trying again on its own; **Refresh scores** in the model browser forces it.
+- Their API refuses requests from web pages, so the browser can't fetch the
+  scores itself. Instead the **Refresh intelligence scores** GitHub Action
+  (`.github/workflows/aa-scores.yml`) fetches them on GitHub's servers and
+  publishes `data/aa-models.json` on this site. The app reads that file, so
+  nobody using the app needs a key.
+- The Action needs one repository secret, `AA_API_KEY`, holding a free
+  Artificial Analysis API key. Add it under **Settings → Secrets and
+  variables → Actions → New repository secret**. Without it, runs skip with a
+  warning and change nothing.
+- It runs daily and refetches only when the published scores are more than
+  7 days old, so a newly added key takes effect within a day. **Run workflow**
+  on the Actions tab forces an immediate refresh. A failed or suspiciously
+  small response never replaces good data.
 - Artificial Analysis ids share nothing with OpenRouter's, so models are
   matched by creator plus the words in the model name, in any order. Matching
   is deliberately strict because a wrong score is worse than none. A near
@@ -72,9 +81,10 @@ show [Artificial Analysis](https://artificialanalysis.ai/) scores.
 - Where Artificial Analysis benchmarks a separate thinking or reasoning
   variant, its score is shown alongside, e.g. "AI index 44 (59 reasoning)".
 - The picker's intelligence filter uses 10-point bands built from the data.
-  The browser's tiers (Light, Capable, Strong, Frontier) are percentiles of
-  every model Artificial Analysis measures, so they stay meaningful if the
-  index is rescaled.
+  The model browser (the bar-chart button in the header) sorts and filters by
+  intelligence, coding, maths, price, speed, context or age. Its tiers
+  (Light, Capable, Strong, Frontier) are percentiles of every model Artificial
+  Analysis measures, so they stay meaningful if the index is rescaled.
 - Data is attributed to Artificial Analysis in the model browser, as their
   free API requires.
 
@@ -119,8 +129,8 @@ in `sw.js` so installed copies pick up the new shell on their next launch.
 
 In daily use against the live OpenRouter API. Every feature is covered by the
 end-to-end suite in `tests/`, which mocks OpenRouter and Artificial Analysis.
-The Artificial Analysis integration was built against its documented response
-shape and has not yet been run against the live API from a browser.
+The scores Action was tested against a local stand-in for the Artificial
+Analysis API; its first live run happens once the `AA_API_KEY` secret exists.
 
 ## Third-party libraries
 

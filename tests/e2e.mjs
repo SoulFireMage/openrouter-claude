@@ -49,12 +49,15 @@ const fakeFetch = () => {
     { junk: true }, null
   ] };
   window.fetch = async (url, opts = {}) => {
-    if (String(url).startsWith("https://artificialanalysis.ai/")) {
-      window.__aaRequests.push({ url: String(url), key: (opts.headers || {})["x-api-key"] });
-      const mode = localStorage.getItem("__aaMode") || "ok";
-      if (mode === "cors") throw new TypeError("Failed to fetch");
-      if (mode === "401") return new Response(JSON.stringify({ error: "unauthorized" }), { status: 401 });
-      return new Response(JSON.stringify(window.__aaFixture), { status: 200, headers: { "Content-Type": "application/json" } });
+    // The scores file the GitHub Action publishes. "404" (not published yet)
+    // is the default so earlier checks see an app without scores.
+    if (String(url).endsWith("data/aa-models.json")) {
+      window.__aaRequests.push(String(url));
+      const mode = localStorage.getItem("__aaMode") || "404";
+      if (mode === "404") return new Response("Not found", { status: 404 });
+      if (mode === "bad") return new Response("{not json", { status: 200 });
+      return new Response(JSON.stringify({ source: "Artificial Analysis", fetchedAt: new Date(Date.now() - 2 * 86400000).toISOString(), data: window.__aaFixture.data }),
+        { status: 200, headers: { "Content-Type": "application/json" } });
     }
     if (!String(url).startsWith("https://openrouter.ai/")) return realFetch(url, opts);
     if (String(url).endsWith("/models")) {
@@ -554,23 +557,32 @@ const storedTiming = (await curChat()).pop().timing;
 check("timing persisted", storedTiming && storedTiming.wait >= 0 && storedTiming.gen > 0, JSON.stringify(storedTiming));
 
 
-// ---------- Artificial Analysis scores ----------
-await page.evaluate(() => localStorage.removeItem("orc_filters"));
+// ---------- Artificial Analysis scores (published by the GitHub Action) ----------
+await page.evaluate(() => {
+  localStorage.removeItem("orc_filters");
+  localStorage.setItem("orc_aa_key", "old-key"); localStorage.setItem("orc_aa_cache", "{}"); localStorage.setItem("orc_aa_attempt", "1");
+});
 await page.reload({ waitUntil: "load" });
 await page.waitForTimeout(400);
-check("aa: no request without a key", (await page.evaluate(() => window.__aaRequests.length)) === 0);
+check("aa: legacy per-device key and cache removed", await page.evaluate(() => ["orc_aa_key", "orc_aa_cache", "orc_aa_attempt"].every(k => localStorage.getItem(k) === null)));
+check("aa: scores file requested once", (await page.evaluate(() => window.__aaRequests.length)) === 1);
 await page.click("#open-settings");
-check("aa: intel filter hidden without scores", await page.$eval("#filter-intel", e => e.hidden));
-await page.fill("#aa-key", "aa_testkey123");
+check("aa: unpublished file is silent", await page.$eval("#filter-intel", e => e.hidden) && await page.$eval("#aa-status", e => e.hidden));
+check("aa: no key field any more", (await page.$("#aa-key")) === null);
 await page.click("#save-settings");
-await page.waitForFunction(() => !!localStorage.getItem("orc_aa_cache"));
-const aaReq = await page.evaluate(() => window.__aaRequests);
-check("aa: one request with x-api-key", aaReq.length === 1 && aaReq[0].key === "aa_testkey123" && aaReq[0].url === "https://artificialanalysis.ai/api/v2/data/llms/models", JSON.stringify(aaReq));
-const aaCacheStored = await page.evaluate(() => JSON.parse(localStorage.getItem("orc_aa_cache")));
-check("aa: cache normalised, junk dropped", typeof aaCacheStored.fetchedAt === "number" && aaCacheStored.models.length === 8, String(aaCacheStored.models.length));
+
+await page.evaluate(() => localStorage.setItem("__aaMode", "bad"));
+await page.reload({ waitUntil: "load" });
+await page.waitForTimeout(400);
+await page.click("#open-settings");
+check("aa: unreadable file reported, no scores", /Couldn't load intelligence scores/.test(await page.textContent("#aa-status")) && await page.$eval("#filter-intel", e => e.hidden), await page.textContent("#aa-status"));
+await page.click("#save-settings");
+
+await page.evaluate(() => localStorage.setItem("__aaMode", "ok"));
+await page.reload({ waitUntil: "load" });
 await page.click("#open-settings");
 await page.waitForFunction(() => !document.getElementById("filter-intel").hidden);
-check("aa: status shows matched count", /Matched 4 of 6 OpenRouter models\./.test(await page.textContent("#aa-status")), await page.textContent("#aa-status"));
+check("aa: status shows source, age and matched count", (await page.textContent("#aa-status")) === "Intelligence scores from Artificial Analysis, updated 2 days ago. Matched 4 of 6 models.", await page.textContent("#aa-status"));
 const intelOpts = await page.$$eval("#filter-intel option", os => os.map(o => o.textContent));
 check("aa: intel bands from rounded scores", JSON.stringify(intelOpts) === JSON.stringify(["Any intelligence", "Has a score (4)", "40+ (1)", "20–29 (1)", "10–19 (2)"]), JSON.stringify(intelOpts));
 const aaLabels = await page.$$eval("#model-select option", os => os.map(o => o.textContent));
@@ -603,16 +615,6 @@ check("aa: applying profile restores intel filter", (await page.$eval("#filter-i
 await page.click("#reset-filters");
 await page.selectOption("#profile-select", "");
 await page.click("#save-settings");
-
-// Weekly cache.
-await page.reload({ waitUntil: "load" });
-await page.waitForTimeout(500);
-check("aa: fresh cache, no refetch on reload", (await page.evaluate(() => window.__aaRequests.length)) === 0);
-await page.evaluate(() => { const c = JSON.parse(localStorage.getItem("orc_aa_cache")); c.fetchedAt = Date.now() - 8 * 86400000; localStorage.setItem("orc_aa_cache", JSON.stringify(c)); localStorage.removeItem("orc_aa_attempt"); });
-await page.reload({ waitUntil: "load" });
-await page.waitForFunction(() => window.__aaRequests.length === 1);
-await page.waitForFunction(() => JSON.parse(localStorage.getItem("orc_aa_cache")).fetchedAt > Date.now() - 60000);
-check("aa: stale cache refetched once", (await page.evaluate(() => window.__aaRequests.length)) === 1);
 
 // ---------- Model browser ----------
 await page.click("#open-settings");
@@ -649,26 +651,21 @@ await page.fill("#browse-search", "claude 4 sonnet");
 check("browse: search matches Artificial Analysis names", JSON.stringify(await bNames()) === JSON.stringify(["Anthropic: Claude Sonnet 4"]), JSON.stringify(await bNames()));
 await page.fill("#browse-search", "");
 
-// Failures keep the cached scores.
-await page.evaluate(() => localStorage.setItem("__aaMode", "cors"));
-await page.click("#browse-refresh");
-await page.waitForFunction(() => /Couldn't reach Artificial Analysis/.test(document.getElementById("browse-attrib").textContent));
-check("aa: blocked request reported, scores kept", (await page.$$eval("#browse-list .score", ss => ss.filter(s => s.textContent !== "–").length)) === 4);
-await page.evaluate(() => localStorage.setItem("__aaMode", "401"));
-await page.click("#browse-refresh");
-await page.waitForFunction(() => /key was rejected/.test(document.getElementById("browse-attrib").textContent));
-check("aa: rejected key reported", /HTTP 401/.test(await page.textContent("#browse-attrib")));
-await page.evaluate(() => { const c = JSON.parse(localStorage.getItem("orc_aa_cache")); c.fetchedAt = Date.now() - 8 * 86400000; localStorage.setItem("orc_aa_cache", JSON.stringify(c)); });
-await page.reload({ waitUntil: "load" });
-await page.waitForTimeout(500);
-check("aa: no automatic retry within an hour of a failure", (await page.evaluate(() => window.__aaRequests.length)) === 0);
-await page.evaluate(() => localStorage.removeItem("__aaMode"));
+// The header button opens the browser directly.
+await page.click("#browse-close");
+await page.waitForFunction(() => document.getElementById("browse-view").hidden);
+await page.click("#save-settings");
+await page.click("#open-browse");
+await page.waitForSelector("#browse-view:not([hidden]) .mcard");
+check("browse: header button opens it", (await page.$$("#browse-list .mcard")).length === 6 && !(await page.$eval("#settings-overlay", e => e.classList.contains("open"))));
+await page.click("#browse-close");
+await page.waitForFunction(() => document.getElementById("browse-view").hidden);
 
 // Export never carries the Artificial Analysis key or cache.
 await page.click("#open-chats");
 const [dlAA] = await Promise.all([page.waitForEvent("download"), page.click("#export-btn")]);
 const exportAA = (await import("fs")).readFileSync(await dlAA.path(), "utf8");
-check("export excludes aa key and cache", !exportAA.includes("aa_testkey123") && !exportAA.includes("GPQA") && !exportAA.includes("gpqa"));
+check("export excludes intelligence scores", !exportAA.includes("GPQA") && !exportAA.includes("gpqa"));
 
 check("no page errors", errors.length === 0, JSON.stringify(errors));
 console.log(JSON.stringify(results, null, 2));
