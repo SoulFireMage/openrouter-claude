@@ -34,9 +34,13 @@ just static files.
   prompt-only persona can be applied without changing the model. The starred
   default profile is applied to every new chat. Suggested names come from the
   current chat's title, falling back to the model's name.
-- Model picker with provider, capability (vision, reasoning, tools) and budget
-  filters plus text search, grouped by provider, with context window and
-  per-million-token pricing shown for the selected model.
+- Model picker with provider, capability (vision, reasoning, tools),
+  intelligence and budget filters plus text search, grouped by provider, with
+  context window and per-million-token pricing shown for the selected model.
+- Optional intelligence scores from Artificial Analysis (see below): each
+  model in the picker shows its index, and a **Browse & compare models** page
+  sorts and filters the whole catalogue by intelligence, coding, maths, price,
+  speed, context or age, with a briefing card per model.
 - Per-reply footer showing the model and provider that served it, token
   counts and cost as reported by OpenRouter, time to first token, and
   generation speed in tokens per second.
@@ -48,6 +52,31 @@ just static files.
   shown as text, never rendered.
 - On a phone, Enter inserts a newline and the button sends. With a physical
   keyboard, Enter sends and Shift+Enter inserts a newline.
+
+## Model intelligence scores
+
+Hundreds of models sound fluent in conversation; far fewer hold up on
+multi-step reasoning or agentic work. To help tell them apart, the app can
+show [Artificial Analysis](https://artificialanalysis.ai/) scores.
+
+- Add a free Artificial Analysis API key in settings. Like the OpenRouter key,
+  it is stored only on the device and never committed or exported.
+- Scores are fetched once, cached on the device, and refetched when the cache
+  is more than 7 days old. After a failed fetch the app waits an hour before
+  trying again on its own; **Refresh scores** in the model browser forces it.
+- Artificial Analysis ids share nothing with OpenRouter's, so models are
+  matched by creator plus the words in the model name, in any order. Matching
+  is deliberately strict because a wrong score is worse than none. A near
+  match is used only when unambiguous and is marked with "~". Unmatched
+  models simply show no score; settings reports how many matched.
+- Where Artificial Analysis benchmarks a separate thinking or reasoning
+  variant, its score is shown alongside, e.g. "AI index 44 (59 reasoning)".
+- The picker's intelligence filter uses 10-point bands built from the data.
+  The browser's tiers (Light, Capable, Strong, Frontier) are percentiles of
+  every model Artificial Analysis measures, so they stay meaningful if the
+  index is rescaled.
+- Data is attributed to Artificial Analysis in the model browser, as their
+  free API requires.
 
 ## Security notes (read before adding a real key)
 
@@ -72,6 +101,9 @@ npx serve .
 
 Then open the printed URL in a browser.
 
+The end-to-end suite in `tests/` drives the app in headless Chromium with both
+APIs mocked, so it needs no keys. See `tests/README.md`.
+
 ## Deploying to GitHub Pages (so it's reachable from your phone)
 
 1. Repo **Settings → Pages**.
@@ -85,10 +117,10 @@ in `sw.js` so installed copies pick up the new shell on their next launch.
 
 ## Status
 
-Reviewed and tested end-to-end in headless Chromium against a mocked
-OpenRouter API (streaming, markdown, errors, retry, stop, reload persistence,
-HTML escaping). Not yet exercised against a live key: add one in the running
-app (never in the repo) and try a message.
+In daily use against the live OpenRouter API. Every feature is covered by the
+end-to-end suite in `tests/`, which mocks OpenRouter and Artificial Analysis.
+The Artificial Analysis integration was built against its documented response
+shape and has not yet been run against the live API from a browser.
 
 ## Third-party libraries
 
