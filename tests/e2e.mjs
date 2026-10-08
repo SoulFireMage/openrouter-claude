@@ -62,7 +62,11 @@ const fakeFetch = () => {
     ["lgai", "lg"], ["meta-llama", "meta"], ["mistralai", "mistral"], ["x-ai", "xai"], ["qwen", "alibaba"],
     ["moonshotai", "kimi"], ["z-ai", "zai"], ["amazon", "aws"], ["microsoft", "azure"], ["nousresearch", "nous-research"],
     ["ibm-granite", "ibm"], ["bytedance-seed", "bytedance_seed"], ["ai21", "ai21-labs"], ["liquid", "liquidai"],
-    ["deepseek", "deepseek"]
+    ["deepseek", "deepseek"],
+    ["mistral-ai", "mistral"], ["qwen", "alibaba-cloud"], ["moonshot-ai", "kimi"], ["z-ai", "zhipu"], ["zhipu-ai", "zai"],
+    ["microsoft", "microsoft-azure"], ["liquid", "liquid-ai"], ["deepseek-ai", "deepseek"], ["google", "google-deepmind"],
+    ["cohere", "cohereforai"], ["cohere", "cohere-for-ai"], ["meituan-longcat", "longcat"], ["lgai-exaone", "lg"],
+    ["lgai", "lg-ai-research"]
   ];
   window.__imgRequests = [];
   window.__tinyPng = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==";
@@ -796,6 +800,7 @@ await page.click("#save-settings");
 
 check("img: composer switches to image mode", (await page.$eval("#composer", e => e.placeholder)) === "Describe an image…" && !(await page.$eval("#image-options", e => e.hidden)));
 const optShape = await page.$$eval("#image-options select", ss => ss.map(s => [s.getAttribute("data-param"), [...s.options].map(o => o.textContent)]));
+check("img: every option control has an accessible name", await page.$$eval("#image-options select", ss => ss.length === 3 && ss.every(s => (s.getAttribute("aria-label") || "").length > 0)), JSON.stringify(await page.$$eval("#image-options select", ss => ss.map(s => s.getAttribute("aria-label")))));
 check("img: options built from the model's capabilities", JSON.stringify(optShape) === JSON.stringify([["aspect_ratio", ["Any shape", "1:1", "16:9"]], ["quality", ["Any quality", "low", "high"]], ["n", ["1 image", "2 images", "3 images", "4 images"]]]), JSON.stringify(optShape));
 check("img: no refine option before any image", (await page.$("#img-refine")) === null);
 await page.selectOption('#image-options select[data-param="aspect_ratio"]', "16:9");
@@ -833,6 +838,46 @@ check("img: copy puts a png on the clipboard", clipTypes.includes("image/png"), 
 await page.goBack();
 await page.waitForFunction(() => document.getElementById("image-viewer").hidden);
 check("img: back button closes the viewer", page.url().endsWith("/index.html"));
+
+// The viewer behaves as a modal dialog, and Share hands over the image file.
+await page.evaluate(() => {
+  window.__shared = [];
+  window.__shareError = null;
+  Object.defineProperty(navigator, "canShare", { configurable: true, value: () => true });
+  Object.defineProperty(navigator, "share", { configurable: true, value: async (d) => {
+    window.__shared.push(d.files.map(f => [f.name, f.type, f.size]));
+    if (window.__shareError) throw window.__shareError;
+  } });
+});
+await page.click(".msg.assistant .msg-images .img-thumb");
+await page.waitForSelector("#image-viewer:not([hidden])");
+check("img: viewer is a modal dialog", await page.$eval("#image-viewer", v => v.getAttribute("role") === "dialog" && v.getAttribute("aria-modal") === "true" && !!v.getAttribute("aria-label")));
+check("img: focus moves into the viewer; page behind is inert", await page.evaluate(() => document.activeElement.id === "viewer-close" && document.querySelector("header").inert && document.getElementById("messages").inert && document.getElementById("input-bar").inert));
+await page.keyboard.press("Tab");
+const afterTab = await page.evaluate(() => document.activeElement.id);
+await page.keyboard.press("Shift+Tab");
+const afterShiftTab = await page.evaluate(() => document.activeElement.id);
+check("img: Tab is trapped inside the viewer", afterTab === "viewer-save" && afterShiftTab === "viewer-close", afterTab + " / " + afterShiftTab);
+await page.click("#viewer-share");
+await page.waitForFunction(() => window.__shared.length === 1);
+const sharedFile = await page.evaluate(() => window.__shared[0]);
+check("img: share hands over the image as a png file", sharedFile.length === 1 && /^openrouter-image-\d{8}-\d{6}\.png$/.test(sharedFile[0][0]) && sharedFile[0][1] === "image/png" && sharedFile[0][2] > 0, JSON.stringify(sharedFile));
+await page.evaluate(() => { window.__shareError = new Error("share target failed"); });
+await page.click("#viewer-share");
+await page.waitForFunction(() => /Couldn't share/.test(document.getElementById("viewer-status").textContent));
+check("img: a failed share is reported", (await page.textContent("#viewer-status")) === "Couldn't share: share target failed", await page.textContent("#viewer-status"));
+await page.keyboard.press("Escape");
+await page.waitForFunction(() => document.getElementById("image-viewer").hidden);
+check("img: Escape closes the viewer and returns focus", await page.evaluate(() => document.activeElement.classList.contains("img-thumb") && !document.querySelector("header").inert));
+await page.evaluate(() => { window.__shareError = new DOMException("cancelled", "AbortError"); });
+await page.click(".msg.assistant .msg-images .img-thumb");
+await page.waitForSelector("#image-viewer:not([hidden])");
+await page.click("#viewer-share");
+await page.waitForFunction(() => window.__shared.length === 3);
+await page.waitForTimeout(100);
+check("img: cancelling the share sheet is silent", (await page.textContent("#viewer-status")) === "");
+await page.click("#viewer-close");
+await page.waitForFunction(() => document.getElementById("image-viewer").hidden);
 
 await page.reload({ waitUntil: "load" });
 await imgsLoaded(4);
@@ -924,6 +969,14 @@ const aliasLabels = await page.$$eval("#model-select option", os => Object.fromE
 const aliasMisses = aliasPairs.filter(([org], i) => !(aliasLabels[org + "/alias-probe-" + i] || "").endsWith("· AI " + (10 + i)))
   .map(([org, aa]) => org + "->" + aa);
 check("aa: every creator alias matches (" + aliasPairs.length + " pairs)", aliasMisses.length === 0, "missed: " + JSON.stringify(aliasMisses));
+// Every alias in the app's own table must appear in a tested pair, so a new
+// alias can't be added without a check.
+const appSource = await (await fetch(BASE + "/index.html")).text();   // the same code the browser is running
+const aliasBlock = /var AA_CREATOR_ALIAS = \{([\s\S]*?)\};/.exec(appSource);
+const aliasKeys = aliasBlock ? [...aliasBlock[1].matchAll(/"([^"]+)":/g)].map(m => m[1]) : [];
+const tested = new Set(aliasPairs.flat().map(n => n.toLowerCase().replace(/[^a-z0-9]+/g, "-")));
+const untested = aliasKeys.filter(k => !tested.has(k));
+check("aa: every alias in the app's table has a tested pair (" + aliasKeys.length + " aliases)", aliasKeys.length > 30 && untested.length === 0, "untested: " + JSON.stringify(untested));
 check("aa: an unknown org never borrows another creator's score", !/AI/.test(aliasLabels["unknownorg/alias-probe-99"] || "AI"), aliasLabels["unknownorg/alias-probe-99"]);
 await page.click("#save-settings");
 await page.evaluate(() => { localStorage.removeItem("__aaMode"); localStorage.removeItem("__orMode"); });

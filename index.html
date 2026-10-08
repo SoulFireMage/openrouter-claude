@@ -969,7 +969,7 @@
   </button>
 </div>
 
-<div id="image-viewer" hidden>
+<div id="image-viewer" role="dialog" aria-modal="true" aria-label="Image viewer" hidden>
   <img id="viewer-img" alt="Generated image">
   <div class="viewer-bar">
     <button type="button" class="btn" id="viewer-save">Save</button>
@@ -2866,11 +2866,11 @@
     return null;
   }
 
-  function addOptionSelect(param, anyLabel, values, labelFor, saved, model) {
+  function addOptionSelect(param, anyLabel, values, labelFor, saved, model, ariaLabel) {
     var sel = document.createElement("select");
     sel.className = "img-opt";
     sel.setAttribute("data-param", param);
-    sel.setAttribute("aria-label", anyLabel.replace(/^Any /, ""));
+    sel.setAttribute("aria-label", ariaLabel);
     if (anyLabel) addOption(sel, "", anyLabel);
     values.forEach(function (v) { addOption(sel, String(v), labelFor(v)); });
     var want = saved[param] !== undefined ? String(saved[param]) : (anyLabel ? "" : String(values[0]));
@@ -2888,17 +2888,17 @@
     if (!e) return;
     var saved = readImageOpts()[model] || {};
     var same = function (v) { return v; };
-    [["aspect_ratio", "Any shape"], ["resolution", "Any size"], ["quality", "Any quality"]].forEach(function (pair) {
-      var d = e.params[pair[0]];
+    [["aspect_ratio", "Any shape", "Image shape"], ["resolution", "Any size", "Image size"], ["quality", "Any quality", "Image quality"]].forEach(function (spec) {
+      var d = e.params[spec[0]];
       if (!d || d.type !== "enum" || !Array.isArray(d.values)) return;
       var values = d.values.filter(function (v) { return typeof v === "string" && v !== "auto"; });
-      if (values.length) addOptionSelect(pair[0], pair[1], values, same, saved, model);
+      if (values.length) addOptionSelect(spec[0], spec[1], values, same, saved, model, spec[2]);
     });
     var nd = e.params.n;
     if (nd && nd.type === "range" && typeof nd.max === "number" && nd.max > 1) {
       var counts = [];
       for (var c = Math.max(1, nd.min || 1); c <= Math.min(nd.max, 4); c++) counts.push(c);
-      addOptionSelect("n", "", counts, function (v) { return v + (v === 1 ? " image" : " images"); }, saved, model);
+      addOptionSelect("n", "", counts, function (v) { return v + (v === 1 ? " image" : " images"); }, saved, model, "Number of images");
     }
     var refs = e.params.input_references;
     if (refs && typeof refs.max === "number" && refs.max > 0 && lastGeneratedImage()) {
@@ -3038,6 +3038,16 @@
   var viewerCloseBtn = document.getElementById("viewer-close");
   var viewerRec = null;
   var viewerUrl = null;
+  var viewerReturnFocus = null;
+  // While the viewer is open the page behind it is inert: not focusable and
+  // hidden from assistive technology.
+  var viewerBackground = ["header", "#messages", "#image-options", "#input-bar"].map(function (q) {
+    return document.querySelector(q);
+  });
+
+  function viewerButtons() {
+    return [viewerSaveBtn, viewerShareBtn, viewerCopyBtn, viewerCloseBtn].filter(function (b) { return !b.hidden && !b.disabled; });
+  }
 
   function imageFileName(type) {
     var ext = (String(type).split("/")[1] || "png").replace("svg+xml", "svg").replace("jpeg", "jpg");
@@ -3064,7 +3074,10 @@
     viewerStatus.textContent = "";
     viewerShareBtn.hidden = !canShareImage(rec);
     viewerCopyBtn.hidden = /svg/.test(rec.type) || !(window.ClipboardItem && navigator.clipboard && navigator.clipboard.write);
+    viewerReturnFocus = document.activeElement;
+    viewerBackground.forEach(function (n) { if (n) n.inert = true; });
     viewerEl.hidden = false;
+    viewerCloseBtn.focus();
     try { window.history.pushState({ orcViewer: true }, ""); } catch (e) { /* ignore */ }
   }
 
@@ -3074,6 +3087,9 @@
     if (viewerUrl) URL.revokeObjectURL(viewerUrl);
     viewerUrl = null;
     viewerRec = null;
+    viewerBackground.forEach(function (n) { if (n) n.inert = false; });
+    if (viewerReturnFocus && document.contains(viewerReturnFocus)) viewerReturnFocus.focus();
+    viewerReturnFocus = null;
   }
 
   function closeViewer() {
@@ -3121,6 +3137,19 @@
   });
 
   viewerCloseBtn.addEventListener("click", closeViewer);
+  viewerEl.addEventListener("keydown", function (e) {
+    if (e.key === "Escape") {
+      e.preventDefault();
+      closeViewer();
+      return;
+    }
+    if (e.key !== "Tab") return;
+    var buttons = viewerButtons();
+    if (!buttons.length) return;
+    var first = buttons[0], last = buttons[buttons.length - 1];
+    if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+    else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+  });
   window.addEventListener("popstate", function () {
     if (!viewerEl.hidden) hideViewer();
   });
