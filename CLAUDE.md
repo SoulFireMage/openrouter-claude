@@ -23,10 +23,18 @@ phone, so every change ships as a PR that is merged to `main`, which deploys.
   commits `data/aa-models.json`, which the app reads from its own site.
   Don't reintroduce a browser-side key.
 
+- Image models use OpenRouter's image API (`POST /images`, catalogue at
+  `/images/models`), not chat. Generated images are stored as Blobs in
+  IndexedDB (database `orc`, store `images`, indexed by `chatId`); chat
+  messages hold only `images: [{ id, type }]` references, because
+  localStorage is far too small for image data.
+
 ## Things that bite
 
 - Inside the IIFE, `history` is the current chat's message array. Use
   `window.history` for the browser's history API.
+- Never put generated image data into the DOM as markup. Images are shown
+  through `<img src="blob:...">` only, so a returned SVG's scripts can't run.
 - Model output is rendered with marked plus KaTeX and then sanitised with
   DOMPurify; raw HTML from the model is escaped to text. Keep it that way.
 - Chat history entries are only `user` and `assistant`. Errors are transient
@@ -39,7 +47,8 @@ phone, so every change ships as a PR that is merged to `main`, which deploys.
 
 `orc_api_key`, `orc_model`, `orc_system_prompt`, `orc_filters`,
 `orc_chats` (index) and `orc_chat_<id>` (messages), `orc_current_chat`,
-`orc_profiles`, `orc_active_profile`. Legacy keys cleaned up on load:
+`orc_profiles`, `orc_active_profile`, `orc_image_models` (cached image
+catalogue), `orc_image_opts` (per-model image options). Legacy keys cleaned up on load:
 `orc_history` (migrated into a chat) and `orc_aa_key`, `orc_aa_cache`,
 `orc_aa_attempt` (from the abandoned per-device Artificial Analysis key).
 

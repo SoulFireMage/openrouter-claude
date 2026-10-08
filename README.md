@@ -45,6 +45,13 @@ just static files.
 - Per-reply footer showing the model and provider that served it, token
   counts and cost as reported by OpenRouter, time to first token, and
   generation speed in tokens per second.
+- Image generation: pick an image model (filter by "Image generation") and
+  the composer switches to image mode. A row above the message box offers the
+  shapes, sizes, quality levels and image counts that model supports. Replies
+  show the images with full-screen view, Save, Share and Copy, plus cost and
+  time taken. Follow-up prompts refine the last image by default. Images are
+  kept in the browser's IndexedDB on the device; exports carry references but
+  not the image data, and deleting a chat deletes its images.
 - Copy: every turn has a copy icon that copies the message's raw markdown,
   and every code block has a header with its language and a Copy button.
 - Full markdown (headings, lists, tables, quotes, links, code) and LaTeX
@@ -53,6 +60,25 @@ just static files.
   shown as text, never rendered.
 - On a phone, Enter inserts a newline and the button sends. With a physical
   keyboard, Enter sends and Shift+Enter inserts a newline.
+
+## Image generation
+
+Image models use OpenRouter's dedicated image API rather than chat. One
+prompt plus options goes in, image files come back, and billing is all or
+nothing: a stopped or failed generation costs nothing.
+
+- The model list merges OpenRouter's image catalogue, so image-only models
+  such as FLUX, Recraft, Seedream and GPT Image appear alongside chat models,
+  marked "· image".
+- The catalogue lists which options each model accepts, so the options row
+  only ever offers settings the chosen model supports. Choices are remembered
+  per model.
+- The info line shows the model's price, per image, per megapixel or per
+  million image tokens depending on the provider.
+- A chat can mix models. A text model sees the prompts and a note that an
+  image was made, not the images themselves.
+- SVG output (Recraft's vector models) is only ever displayed as an image,
+  so any script inside it cannot run.
 
 ## Model intelligence scores
 
@@ -145,6 +171,10 @@ Vendored under `vendor/` so the app works offline and depends on no CDN:
 ## Ideas for later
 
 - Export a single chat as Markdown for sharing.
+- Streamed previews for the image models that support them.
+- Optionally include images in exports.
+- Attach your own photos, as references for image models and as input for
+  vision models.
 - Rename chats.
 - Cap or summarise old history so long threads don't grow the per-request cost
   without bound.
