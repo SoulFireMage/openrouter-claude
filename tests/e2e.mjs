@@ -55,6 +55,19 @@ const fakeFetch = () => {
       model_creator: { name: "OpenAI", slug: "openai" }, evaluations: {} },
     { junk: true }, null
   ] };
+  window.__imgRequests = [];
+  window.__tinyPng = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==";
+  window.__imageModels = [
+    { id: "acme/pixel-1", name: "Pixel 1", created: 1790000000,
+      architecture: { input_modalities: ["text", "image"], output_modalities: ["image"] },
+      supported_parameters: { aspect_ratio: { type: "enum", values: ["1:1", "16:9", "auto"] }, quality: { type: "enum", values: ["auto", "low", "high"] },
+        n: { type: "range", min: 1, max: 6 }, input_references: { type: "range", min: 0, max: 4 } },
+      supports_streaming: false },
+    { id: "openai/gpt-image-9", name: "GPT Image 9", created: 1790000001,
+      architecture: { input_modalities: ["text"], output_modalities: ["image"] },
+      supported_parameters: { aspect_ratio: { type: "enum", values: ["1:1", "3:2"] }, n: { type: "range", min: 1, max: 1 } },
+      supports_streaming: true }
+  ];
   window.fetch = async (url, opts = {}) => {
     // The scores file the GitHub Action publishes. "404" (not published yet)
     // is the default so earlier checks see an app without scores.
@@ -68,6 +81,37 @@ const fakeFetch = () => {
         { status: 200, headers: { "Content-Type": "application/json" } });
     }
     if (!String(url).startsWith("https://openrouter.ai/")) return realFetch(url, opts);
+
+    // OpenRouter's image API. Off unless "__imgMode" is set, so earlier
+    // checks see no image models. Modes: on, fail, slow, svg.
+    if (String(url).startsWith("https://openrouter.ai/api/v1/images")) {
+      const u = String(url);
+      const json = (o, status = 200) => new Response(JSON.stringify(o), { status, headers: { "Content-Type": "application/json" } });
+      const mode = localStorage.getItem("__imgMode");
+      if (u.endsWith("/images/models")) return json({ data: mode ? window.__imageModels : [] });
+      if (u.endsWith("/endpoints")) {
+        const id = decodeURIComponent(u.split("/images/models/")[1].replace(/\/endpoints$/, ""));
+        const prices = { "acme/pixel-1": [0.04], "openai/gpt-image-9": [0.02, 0.08] }[id] || [];
+        return json({ id, endpoints: [{ provider_name: "Mock", pricing: prices.map((c) => ({ billable: "output_image", unit: "image", cost_usd: c })) }] });
+      }
+      const body = JSON.parse(opts.body);
+      window.__imgRequests.push(body);
+      if (mode === "fail") return json({ error: { message: "Generation failed", code: 502 } }, 502);
+      if (mode === "slow") {
+        await new Promise((resolve, reject) => {
+          const t = setTimeout(resolve, 4000);
+          if (opts.signal) opts.signal.addEventListener("abort", () => { clearTimeout(t); reject(new DOMException("The user aborted a request.", "AbortError")); });
+        });
+      }
+      if (mode === "svg") {
+        const svg = '<svg xmlns="http://www.w3.org/2000/svg" width="4" height="4"><script>window.__svgpwned = 1</script><rect width="4" height="4" fill="blue"/></svg>';
+        return json({ data: [{ b64_json: btoa(svg), media_type: "image/svg+xml" }], usage: { cost: 0.01 } });
+      }
+      const n = body.n || 1;
+      return json({ created: 1, data: Array.from({ length: n }, () => ({ b64_json: window.__tinyPng, media_type: "image/png" })),
+        usage: { prompt_tokens: 0, completion_tokens: 100, cost: 0.04 * n } });
+    }
+
     if (String(url).endsWith("/models")) {
       return new Response(JSON.stringify({ data: [
         { id: "openai/gpt-4o-mini", name: "OpenAI: GPT-4o mini", context_length: 128000,
@@ -685,6 +729,156 @@ await page.click("#open-chats");
 const [dlAA] = await Promise.all([page.waitForEvent("download"), page.click("#export-btn")]);
 const exportAA = (await import("fs")).readFileSync(await dlAA.path(), "utf8");
 check("export excludes intelligence scores", !exportAA.includes("GPQA") && !exportAA.includes("gpqa"));
+
+
+// ---------- Image generation ----------
+const idbCount = () => page.evaluate(() => new Promise((resolve) => {
+  const r = indexedDB.open("orc");
+  r.onsuccess = () => {
+    const db = r.result;
+    if (!db.objectStoreNames.contains("images")) { resolve(0); return; }
+    const c = db.transaction("images").objectStore("images").count();
+    c.onsuccess = () => resolve(c.result);
+  };
+  r.onerror = () => resolve(-1);
+}));
+const imgsLoaded = (n) => page.waitForFunction((n) => {
+  const imgs = [...document.querySelectorAll(".msg.assistant .msg-images img")];
+  return imgs.length === n && imgs.every(i => i.complete && i.naturalWidth > 0);
+}, n);
+const lastMeta = () => page.$$eval(".msg.assistant .meta", ms => ms[ms.length - 1].textContent);
+
+await page.evaluate(() => localStorage.setItem("__imgMode", "on"));
+await page.reload({ waitUntil: "load" });
+await page.waitForTimeout(300);
+await page.click("#open-chats");
+await page.click("#new-chat-btn");
+await page.click("#open-settings");
+await page.click("#reset-filters");
+await page.waitForFunction(() => [...document.querySelectorAll("#model-select option")].some(o => o.value === "acme/pixel-1"));
+const imgLabels = await page.$$eval("#model-select option", os => os.map(o => o.textContent));
+check("img: image-only models merged and labelled; org label borrowed", imgLabels.includes("acme: Pixel 1 · image") && imgLabels.includes("OpenAI: GPT Image 9 · image"), JSON.stringify(imgLabels));
+await page.selectOption("#filter-capability", "image");
+const imgOnly = await page.$$eval("#model-select option", os => os.filter(o => o.value && !o.textContent.endsWith("(current)")).map(o => o.value).sort());
+check("img: capability filter", JSON.stringify(imgOnly) === JSON.stringify(["acme/pixel-1", "openai/gpt-image-9"]), JSON.stringify(imgOnly));
+await page.selectOption("#model-select", "openai/gpt-image-9");
+await page.waitForFunction(() => /per image/.test(document.getElementById("model-info").textContent));
+check("img: info line with price range from endpoints", (await page.textContent("#model-info")) === "generates images · from $0.020 per image · 2 shapes", await page.textContent("#model-info"));
+await page.selectOption("#model-select", "acme/pixel-1");
+await page.waitForFunction(() => /per image/.test(document.getElementById("model-info").textContent));
+check("img: info line lists capabilities", (await page.textContent("#model-info")) === "generates images · $0.040 per image · 2 shapes · up to 6 per request · can refine reference images", await page.textContent("#model-info"));
+await page.selectOption("#filter-capability", "");
+await page.click("#save-settings");
+
+check("img: composer switches to image mode", (await page.$eval("#composer", e => e.placeholder)) === "Describe an image…" && !(await page.$eval("#image-options", e => e.hidden)));
+const optShape = await page.$$eval("#image-options select", ss => ss.map(s => [s.getAttribute("data-param"), [...s.options].map(o => o.textContent)]));
+check("img: options built from the model's capabilities", JSON.stringify(optShape) === JSON.stringify([["aspect_ratio", ["Any shape", "1:1", "16:9"]], ["quality", ["Any quality", "low", "high"]], ["n", ["1 image", "2 images", "3 images", "4 images"]]]), JSON.stringify(optShape));
+check("img: no refine option before any image", (await page.$("#img-refine")) === null);
+await page.selectOption('#image-options select[data-param="aspect_ratio"]', "16:9");
+await page.selectOption('#image-options select[data-param="n"]', "2");
+const chatReqsBefore = await page.evaluate(() => window.__requests.length);
+await page.fill("#composer", "a red panda astronaut");
+await page.click("#send-btn");
+await imgsLoaded(2);
+const imgReq = await page.evaluate(() => window.__imgRequests[window.__imgRequests.length - 1]);
+check("img: request body carries chosen options only", imgReq.model === "acme/pixel-1" && imgReq.prompt === "a red panda astronaut" && imgReq.aspect_ratio === "16:9" && imgReq.n === 2 && !("quality" in imgReq) && !imgReq.input_references, JSON.stringify(imgReq));
+check("img: no chat request made", (await page.evaluate(() => window.__requests.length)) === chatReqsBefore);
+check("img: footer shows cost, count and time", /^acme\/pixel-1 · \$0\.0800 · 2 images · took \d+\.\ds$/.test(await lastMeta()), await lastMeta());
+const storedImgChat = await curChat();
+const lastStored = storedImgChat[storedImgChat.length - 1];
+check("img: chat stores references, not image data", lastStored.content === "" && lastStored.images.length === 2 && lastStored.images.every(r => r.type === "image/png") && !JSON.stringify(storedImgChat).includes("iVBOR"), JSON.stringify(lastStored));
+check("img: image files in IndexedDB", (await idbCount()) === 2);
+
+check("img: refine offered and on after an image", await page.$eval("#img-refine", c => c.checked));
+await page.fill("#composer", "make it dusk");
+await page.click("#send-btn");
+await imgsLoaded(4);
+const refineReq = await page.evaluate(() => window.__imgRequests[window.__imgRequests.length - 1]);
+check("img: refine sends the last image as a reference", Array.isArray(refineReq.input_references) && refineReq.input_references.length === 1 && refineReq.input_references[0].image_url.url.startsWith("data:image/png;base64,") && refineReq.n === 2 && refineReq.aspect_ratio === "16:9", JSON.stringify(refineReq).slice(0, 200));
+check("img: refined footer", (await lastMeta()).includes("2 images, refined from the last one"), await lastMeta());
+
+await page.click(".msg.assistant .msg-images .img-thumb");
+await page.waitForSelector("#image-viewer:not([hidden])");
+check("img: viewer shows the image", await page.$eval("#viewer-img", i => i.src.startsWith("blob:")));
+const [dlImg] = await Promise.all([page.waitForEvent("download"), page.click("#viewer-save")]);
+check("img: save downloads a named png", /^openrouter-image-\d{8}-\d{6}\.png$/.test(dlImg.suggestedFilename()), dlImg.suggestedFilename());
+await page.click("#viewer-copy");
+await page.waitForFunction(() => /Copied|Couldn't copy/.test(document.getElementById("viewer-status").textContent));
+const clipTypes = await page.evaluate(async () => { try { return (await navigator.clipboard.read()).flatMap(i => i.types); } catch (e) { return ["error: " + e.message]; } });
+check("img: copy puts a png on the clipboard", clipTypes.includes("image/png"), JSON.stringify(clipTypes) + " / " + await page.textContent("#viewer-status"));
+await page.goBack();
+await page.waitForFunction(() => document.getElementById("image-viewer").hidden);
+check("img: back button closes the viewer", page.url().endsWith("/index.html"));
+
+await page.reload({ waitUntil: "load" });
+await imgsLoaded(4);
+check("img: images reload from IndexedDB", true);
+check("img: options remembered per model", (await page.$eval('#image-options select[data-param="aspect_ratio"]', s => s.value)) === "16:9" && (await page.$eval('#image-options select[data-param="n"]', s => s.value)) === "2");
+
+// A text model in the same chat sees prompts and placeholders, never empty turns.
+await page.click("#open-settings");
+await page.waitForFunction(() => document.querySelectorAll("#model-select option").length > 3);
+await page.selectOption("#model-select", "anthropic/claude-sonnet-4");
+await page.click("#save-settings");
+check("img: text model leaves image mode", (await page.$eval("#composer", e => e.placeholder)) === "Message…" && await page.$eval("#image-options", e => e.hidden));
+await page.evaluate(() => window.__scenarios.push({ kind: "ok", text: "Nice pictures." }));
+await page.fill("#composer", "what did you make?");
+await page.click("#send-btn");
+await page.waitForFunction(() => (document.querySelectorAll(".msg.assistant .meta")[document.querySelectorAll(".msg.assistant .meta").length - 1] || {}).textContent?.includes("tokens"));
+const mixedReq = await page.evaluate(() => window.__requests[window.__requests.length - 1]);
+const assistantTurns = mixedReq.messages.filter(m => m.role === "assistant").map(m => m.content);
+check("img: text model gets placeholders for image turns", assistantTurns.length === 2 && assistantTurns.every(c => c === "(An image model generated 2 images here.)"), JSON.stringify(assistantTurns));
+
+// Failure, retry, stop.
+await page.click("#open-settings");
+await page.selectOption("#model-select", "acme/pixel-1");
+await page.click("#save-settings");
+await page.evaluate(() => localStorage.setItem("__imgMode", "fail"));
+await page.fill("#composer", "a lighthouse");
+await page.click("#send-btn");
+await page.waitForSelector(".msg.error .retry-btn");
+check("img: failure reported with retry", (await page.textContent(".msg.error")).includes("Image generation failed: HTTP 502: Generation failed"), await page.textContent(".msg.error"));
+await page.evaluate(() => localStorage.setItem("__imgMode", "on"));
+await page.click(".retry-btn");
+await imgsLoaded(6);
+check("img: retry generates", (await page.$$(".msg.error")).length === 0 && (await idbCount()) === 6);
+await page.evaluate(() => localStorage.setItem("__imgMode", "slow"));
+await page.fill("#composer", "a slow one");
+await page.click("#send-btn");
+await page.waitForFunction(() => /(Generating|Refining) image… \ds/.test((document.querySelector(".msg.assistant.generating") || {}).textContent || ""));
+await page.click("#send-btn");
+await page.waitForSelector(".msg.error");
+check("img: stop cancels without storing anything", (await page.textContent(".msg.error")).includes("Stopped. A cancelled image isn't billed.") && (await idbCount()) === 6 && !(await page.$(".msg.assistant.generating")));
+
+// An SVG with a script is shown only as an image, so the script never runs.
+await page.evaluate(() => localStorage.setItem("__imgMode", "svg"));
+await page.fill("#composer", "a vector logo");
+await page.click("#send-btn");
+await imgsLoaded(7);
+check("img: svg shown as an image; its script never runs", (await page.evaluate(() => window.__svgpwned)) === undefined);
+check("img: svg isn't offered as a refine source", (await page.$("#img-refine")) === null);
+await page.evaluate(() => localStorage.setItem("__imgMode", "on"));
+
+await page.click("#open-browse");
+await page.waitForSelector("#browse-view:not([hidden]) .mcard");
+await page.selectOption("#browse-cap", "image");
+const imgCards = await page.$$eval("#browse-list .mcard", cs => cs.map(c => c.querySelector(".mcard-name").textContent + "|" + c.querySelector(".mcard-sub").textContent));
+check("img: browser filters image models", imgCards.length === 2 && imgCards.every(c => c.includes("image generation")), JSON.stringify(imgCards));
+await page.selectOption("#browse-cap", "");
+await page.click("#browse-close");
+await page.waitForFunction(() => document.getElementById("browse-view").hidden);
+
+await page.click("#open-chats");
+const [dlImgExport] = await Promise.all([page.waitForEvent("download"), page.click("#export-btn")]);
+const imgExportText = (await import("fs")).readFileSync(await dlImgExport.path(), "utf8");
+check("img: export keeps references but no image data", imgExportText.includes('"images"') && !imgExportText.includes("iVBOR") && !imgExportText.includes("PHN2Zy"));
+await page.click("#chats-overlay", { position: { x: 380, y: 400 } });
+await page.click("#open-settings");
+await page.click("#clear-chat");
+await page.waitForFunction(() => document.getElementById("chat-title").textContent === "New chat");
+await page.waitForTimeout(300);
+check("img: deleting the chat deletes its images", (await idbCount()) === 0);
+await page.evaluate(() => localStorage.removeItem("__imgMode"));
 
 check("no page errors", errors.length === 0, JSON.stringify(errors));
 console.log(JSON.stringify(results, null, 2));

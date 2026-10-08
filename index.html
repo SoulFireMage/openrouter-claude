@@ -314,6 +314,97 @@
     margin-bottom: 6px;
   }
 
+  /* ---------- Image generation ---------- */
+  #image-options {
+    flex-shrink: 0;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 12px 0;
+    border-top: 1px solid var(--border);
+    background: var(--bg);
+  }
+
+  #image-options:not([hidden]) + #input-bar { border-top: none; }
+
+  #image-options select {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 6px 10px;
+    border-radius: 14px;
+    font-size: 14px;
+    font-family: inherit;
+    max-width: 46vw;
+  }
+
+  #image-options .img-refine {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 13px;
+    color: var(--text);
+  }
+
+  .msg-images { display: grid; gap: 6px; }
+  .msg-images.multi { grid-template-columns: 1fr 1fr; }
+
+  .img-thumb {
+    display: block;
+    width: 100%;
+    min-height: 60px;
+    padding: 0;
+    border: none;
+    border-radius: 8px;
+    overflow: hidden;
+    background: rgba(0, 0, 0, 0.25);
+    cursor: zoom-in;
+  }
+
+  .img-thumb img { display: block; width: 100%; height: auto; }
+
+  .img-thumb.img-missing {
+    cursor: default;
+    padding: 18px 10px;
+    font-size: 12px;
+    color: var(--text-muted);
+    font-family: inherit;
+  }
+
+  .msg.assistant.generating { color: var(--text-muted); }
+
+  #image-viewer {
+    position: fixed;
+    inset: 0;
+    z-index: 40;
+    display: flex;
+    flex-direction: column;
+    background: rgba(0, 0, 0, 0.94);
+    padding: max(12px, env(safe-area-inset-top)) 12px max(12px, env(safe-area-inset-bottom));
+  }
+
+  #viewer-img {
+    flex: 1;
+    min-height: 0;
+    width: 100%;
+    object-fit: contain;
+  }
+
+  .viewer-bar {
+    display: flex;
+    gap: 8px;
+    margin-top: 10px;
+  }
+
+  #viewer-status {
+    min-height: 1.2em;
+    margin-top: 6px;
+    font-size: 12px;
+    text-align: center;
+    color: var(--text-muted);
+  }
+
   /* ---------- Input bar ---------- */
   #input-bar {
     flex-shrink: 0;
@@ -868,12 +959,25 @@
 
 <div id="messages"></div>
 
+<div id="image-options" hidden></div>
+
 <div id="input-bar">
   <textarea id="composer" rows="1" placeholder="Message…" disabled></textarea>
   <button id="send-btn" disabled aria-label="Send">
     <svg class="icon-send" viewBox="0 0 24 24" fill="currentColor"><path d="M2 21l21-9L2 3v7l15 2-15 2z"/></svg>
     <svg class="icon-stop" viewBox="0 0 24 24" fill="currentColor"><rect x="5" y="5" width="14" height="14" rx="2"/></svg>
   </button>
+</div>
+
+<div id="image-viewer" hidden>
+  <img id="viewer-img" alt="Generated image">
+  <div class="viewer-bar">
+    <button type="button" class="btn" id="viewer-save">Save</button>
+    <button type="button" class="btn" id="viewer-share" hidden>Share</button>
+    <button type="button" class="btn" id="viewer-copy">Copy</button>
+    <button type="button" class="btn primary" id="viewer-close">Close</button>
+  </div>
+  <div id="viewer-status" role="status"></div>
 </div>
 
 <div id="browse-view" hidden>
@@ -903,6 +1007,7 @@
         <option value="vision">Vision</option>
         <option value="reasoning">Reasoning</option>
         <option value="tools">Tool calling</option>
+        <option value="image">Image generation</option>
         <option value="free">Free</option>
       </select>
     </div>
@@ -979,6 +1084,7 @@
           <option value="vision">Vision (image input)</option>
           <option value="reasoning">Reasoning</option>
           <option value="tools">Tool calling</option>
+          <option value="image">Image generation</option>
         </select>
         <select id="filter-intel" aria-label="Intelligence" hidden>
           <option value="">Any intelligence</option>
@@ -1085,6 +1191,8 @@
     filters: "orc_filters",
     profiles: "orc_profiles",
     activeProfile: "orc_active_profile",
+    imageModels: "orc_image_models",
+    imageOpts: "orc_image_opts",
     // Left over from the per-device Artificial Analysis key; removed on load.
     legacyAA: ["orc_aa_key", "orc_aa_cache", "orc_aa_attempt"]
   };
@@ -1445,9 +1553,11 @@
     if (m.requested && m.model && m.requested !== m.model) bits.push("requested " + m.requested);
     if (m.usage) {
       var pt = m.usage.prompt_tokens, ct = m.usage.completion_tokens;
-      if (typeof pt === "number" && typeof ct === "number") bits.push(pt + "→" + ct + " tokens");
+      if (!m.images && typeof pt === "number" && typeof ct === "number") bits.push(pt + "→" + ct + " tokens");
       if (typeof m.usage.cost === "number") bits.push("$" + m.usage.cost.toFixed(4));
     }
+    if (m.images && m.images.length) bits.push(m.images.length + (m.images.length === 1 ? " image" : " images") + (m.refined ? ", refined from the last one" : ""));
+    if (m.timing && typeof m.timing.total === "number") bits.push("took " + (m.timing.total / 1000).toFixed(1) + "s");
     if (m.timing) {
       if (typeof m.timing.wait === "number" && m.timing.wait >= 0) bits.push((m.timing.wait / 1000).toFixed(1) + "s wait");
       var ct2 = m.usage && m.usage.completion_tokens;
@@ -1469,14 +1579,16 @@
     } else {
       el.textContent = m.content;
     }
-    if (m.content) {
+    var hasImages = m.role === "assistant" && Array.isArray(m.images) && m.images.length > 0;
+    if (hasImages) el.appendChild(buildImageGrid(m));
+    if (m.content || hasImages) {
       var actions = document.createElement("div");
       actions.className = "msg-actions";
       var metaEl = document.createElement("span");
       metaEl.className = "meta";
       metaEl.textContent = m.role === "assistant" ? formatMeta(m) : "";
       actions.appendChild(metaEl);
-      actions.appendChild(makeCopyButton("Copy message", function () { return m.content; }));
+      if (m.content) actions.appendChild(makeCopyButton("Copy message", function () { return m.content; }));
       el.appendChild(actions);
     }
     messagesEl.appendChild(el);
@@ -1507,6 +1619,8 @@
 
   function renderHistory() {
     messagesEl.innerHTML = "";
+    revokeThumbUrls();
+    renderImageOptions();
     if (history.length === 0) {
       var empty = document.createElement("div");
       empty.id = "empty-state";
@@ -1651,6 +1765,7 @@
     if (!meta) return;
     if (!confirm("Delete \"" + meta.title + "\"? This can't be undone.")) return;
     storageRemove(KEYS.chatPrefix + id);
+    imageDeleteChat(id);
     chats = chats.filter(function (c) { return c.id !== id; });
     storageSet(KEYS.chats, JSON.stringify(chats));
     if (id === currentChatId) startNewChat();
@@ -1860,7 +1975,9 @@
     var ready = !!storageGet(KEYS.apiKey) && !!storageGet(KEYS.model);
     composerEl.disabled = !ready;
     sendBtn.disabled = !ready && !isStreaming;
-    composerEl.placeholder = ready ? "Message…" : "Add a key and model in settings first";
+    var imageMode = ready && isImageModel(storageGet(KEYS.model));
+    composerEl.placeholder = ready ? (imageMode ? "Describe an image…" : "Message…") : "Add a key and model in settings first";
+    renderImageOptions();
   }
 
   function setStreamingUI(on) {
@@ -2144,6 +2261,7 @@
 
   function matchesFilters(m) {
     if (filters.provider && m.provider !== filters.provider) return false;
+    if (filters.capability === "image" && !m.imageGen) return false;
     if (filters.capability === "vision" && !m.vision) return false;
     if (filters.capability === "reasoning" && !m.reasoning) return false;
     if (filters.capability === "tools" && !m.tools) return false;
@@ -2191,6 +2309,7 @@
   }
 
   function describeOR(m) {
+    if (m.imageGen) return describeImageModel(m);
     var bits = [];
     var ctx = fmtContext(m.context);
     if (ctx) bits.push(ctx);
@@ -2207,6 +2326,7 @@
     var m = null;
     for (var i = 0; i < allModels.length; i++) if (allModels[i].id === id) { m = allModels[i]; break; }
     modelInfo.textContent = m ? describeModel(m) : "";
+    if (m && m.imageGen && !(m.id in imagePrices)) loadImagePrice(m.id, updateModelInfo);
   }
 
   function persistFilters() {
@@ -2269,7 +2389,7 @@
     if (!chosenModel) addOption(modelSelect, "", "Choose a model…");
 
     if (filters.provider) {
-      list.forEach(function (m) { addOption(modelSelect, m.id, m.name + aaLabel(m)); });
+      list.forEach(function (m) { addOption(modelSelect, m.id, pickerLabel(m)); });
     } else {
       // Group by provider so the native picker shows headers.
       var group = null, groupName = null;
@@ -2280,7 +2400,7 @@
           group.label = groupName;
           modelSelect.appendChild(group);
         }
-        addOption(group, m.id, m.name + aaLabel(m));
+        addOption(group, m.id, pickerLabel(m));
       });
     }
     modelSelect.value = chosenModel;
@@ -2296,13 +2416,16 @@
     try {
       var headers = {};
       if (key) headers["Authorization"] = "Bearer " + key;
+      // Image-only models aren't in the main list; their catalogue is separate.
+      var imagesLoaded = fetchImageCatalogue(headers);
       var res = await fetch(OPENROUTER + "/models", { headers: headers });
       if (!res.ok) throw new Error("HTTP " + res.status);
       var data = await res.json();
       var models = (data && data.data) || [];
-      allModels = models
+      await imagesLoaded;
+      allModels = mergeImageModels(models
         .filter(function (m) { return m && typeof m.id === "string"; })
-        .map(normaliseModel)
+        .map(normaliseModel))
         .sort(function (a, b) {
           return a.provider.localeCompare(b.provider) || a.name.localeCompare(b.name);
         });
@@ -2311,6 +2434,7 @@
       rebuildIntelOptions();
       rebuildModelOptions();
       updateAAStatus();
+      updateComposerEnabled();
       if (allModels.length === 0) modelRefreshHint.textContent = "OpenRouter returned no models — check your key.";
     } catch (err) {
       allModels = [];
@@ -2430,13 +2554,591 @@
     }
   });
 
+  /* ---------------- Image generation ----------------
+     Image models use OpenRouter's dedicated image API (POST /images), not
+     chat: one prompt plus options in, image files out, billed all or
+     nothing. Its catalogue (/images/models) says which options each model
+     accepts, so the composer offers only those. Generated images live in
+     IndexedDB, because localStorage is far too small; chat messages keep
+     only references ({ id, type }) to them. */
+  var IMG_DB = "orc";
+  var IMG_STORE = "images";
+  var imgDbPromise = null;
+  var memImages = {};            // fallback when IndexedDB is missing or full
+  var imgStorageWarned = false;
+  var persistAsked = false;
+  var thumbUrls = [];
+  var imagePrices = {};          // model id -> "$0.04 per image", or null if unknown
+  var priceLoading = {};
+  var imageOptsEl = document.getElementById("image-options");
+  var imageCatalogue = (function () {
+    var c = readJson(KEYS.imageModels, null);
+    return c && c.models && typeof c.models === "object" ? c : { fetchedAt: 0, models: {} };
+  })();
+
+  function imageEntry(id) {
+    return id && Object.prototype.hasOwnProperty.call(imageCatalogue.models, id) ? imageCatalogue.models[id] : null;
+  }
+
+  function isImageModel(id) {
+    return !!imageEntry(id);
+  }
+
+  function compactImageModel(m) {
+    var params = m.supported_parameters;
+    var arch = m.architecture || {};
+    return {
+      name: typeof m.name === "string" && m.name ? m.name : m.id,
+      created: typeof m.created === "number" ? m.created : null,
+      params: params && typeof params === "object" && !Array.isArray(params) ? params : {},
+      streaming: !!m.supports_streaming,
+      inputs: Array.isArray(arch.input_modalities) ? arch.input_modalities : []
+    };
+  }
+
+  // Never throws: on any failure the cached catalogue stays in use.
+  async function fetchImageCatalogue(headers) {
+    try {
+      var res = await fetch(OPENROUTER + "/images/models", { headers: headers });
+      if (!res.ok) return;
+      var json = await res.json();
+      if (!json || !Array.isArray(json.data)) return;
+      var models = {};
+      json.data.forEach(function (m) {
+        if (m && typeof m.id === "string") models[m.id] = compactImageModel(m);
+      });
+      imageCatalogue = { fetchedAt: Date.now(), models: models };
+      storageSet(KEYS.imageModels, JSON.stringify(imageCatalogue));
+    } catch (e) { /* keep the cached catalogue */ }
+  }
+
+  // Marks image models in the main list and adds the image-only ones,
+  // borrowing the provider label other models from the same org use.
+  function mergeImageModels(list) {
+    var byId = {}, orgLabel = {};
+    list.forEach(function (m) {
+      byId[m.id] = m;
+      var org = m.id.split("/")[0];
+      if (!orgLabel[org] && m.provider !== org) orgLabel[org] = m.provider;
+    });
+    Object.keys(imageCatalogue.models).forEach(function (id) {
+      var m = byId[id];
+      if (!m) {
+        var e = imageCatalogue.models[id];
+        var org = id.split("/")[0];
+        var name = e.name.indexOf(":") !== -1 ? e.name : (orgLabel[org] || org) + ": " + e.name;
+        m = {
+          id: id, name: name, provider: name.slice(0, name.indexOf(":")).trim(),
+          inPrice: null, outPrice: null, free: false, vision: false, reasoning: false, tools: false,
+          created: e.created, context: null
+        };
+        list.push(m);
+      }
+      m.imageGen = true;
+    });
+    return list;
+  }
+
+  function pickerLabel(m) {
+    return m.name + aaLabel(m) + (m.imageGen ? " · image" : "");
+  }
+
+  function describeImageModel(m) {
+    var e = imageEntry(m.id);
+    var bits = ["generates images"];
+    if (imagePrices[m.id]) bits.push(imagePrices[m.id]);
+    if (!e) return bits.join(" · ");
+    var ar = e.params.aspect_ratio;
+    if (ar && Array.isArray(ar.values)) {
+      var shapes = ar.values.filter(function (v) { return v !== "auto"; }).length;
+      if (shapes) bits.push(shapes + (shapes === 1 ? " shape" : " shapes"));
+    }
+    var res = e.params.resolution;
+    if (res && Array.isArray(res.values) && res.values.length) bits.push("sizes " + res.values.join("/"));
+    var n = e.params.n;
+    if (n && typeof n.max === "number" && n.max > 1) bits.push("up to " + n.max + " per request");
+    var refs = e.params.input_references;
+    if (refs && typeof refs.max === "number" && refs.max > 0) bits.push("can refine reference images");
+    return bits.join(" · ");
+  }
+
+  function fmtCost(x) {
+    return "$" + (x < 0.1 ? x.toFixed(3) : x.toFixed(2));
+  }
+
+  // Price per image (or megapixel) from the model's endpoint records.
+  function loadImagePrice(id, then) {
+    if (id in imagePrices || priceLoading[id]) return;
+    priceLoading[id] = true;
+    var path = id.split("/").map(encodeURIComponent).join("/");
+    fetch(OPENROUTER + "/images/models/" + path + "/endpoints")
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (j) {
+        // Output is priced per image, per megapixel, or per token depending
+        // on the provider. Prefer the most concrete unit available.
+        var lines = [];
+        (j && Array.isArray(j.endpoints) ? j.endpoints : []).forEach(function (ep) {
+          (ep && Array.isArray(ep.pricing) ? ep.pricing : []).forEach(function (p) {
+            if (p && p.billable === "output_image" && typeof p.cost_usd === "number" && p.cost_usd >= 0) lines.push(p);
+          });
+        });
+        var unit = ["image", "megapixel", "token"].filter(function (u) {
+          return lines.some(function (p) { return p.unit === u; });
+        })[0];
+        if (!unit) { imagePrices[id] = null; return; }
+        var use = lines.filter(function (p) { return p.unit === unit; });
+        var min = Math.min.apply(null, use.map(function (p) { return p.cost_usd; }));
+        var varies = use.some(function (p) { return p.cost_usd !== min; });
+        imagePrices[id] = (varies ? "from " : "") + (unit === "token"
+          ? "$" + (min * 1e6).toFixed(2) + " per 1M image tokens"
+          : fmtCost(min) + " per " + unit);
+      })
+      .catch(function () { imagePrices[id] = null; })
+      .then(function () {
+        delete priceLoading[id];
+        if (then) then();
+      });
+  }
+
+  /* ----- Storage ----- */
+  function imgDb() {
+    if (imgDbPromise) return imgDbPromise;
+    imgDbPromise = new Promise(function (resolve) {
+      try {
+        var req = indexedDB.open(IMG_DB, 1);
+        req.onupgradeneeded = function () {
+          var store = req.result.createObjectStore(IMG_STORE, { keyPath: "id" });
+          store.createIndex("chatId", "chatId");
+        };
+        req.onsuccess = function () { resolve(req.result); };
+        req.onerror = function () { resolve(null); };
+        req.onblocked = function () { resolve(null); };
+      } catch (e) {
+        resolve(null);
+      }
+    });
+    return imgDbPromise;
+  }
+
+  async function imagePut(rec) {
+    var db = await imgDb();
+    var ok = false;
+    if (db) {
+      ok = await new Promise(function (resolve) {
+        try {
+          var tx = db.transaction(IMG_STORE, "readwrite");
+          tx.objectStore(IMG_STORE).put(rec);
+          tx.oncomplete = function () { resolve(true); };
+          tx.onerror = tx.onabort = function () { resolve(false); };
+        } catch (e) {
+          resolve(false);
+        }
+      });
+    }
+    if (!ok) memImages[rec.id] = rec;
+    return ok;
+  }
+
+  async function imageGet(id) {
+    if (memImages[id]) return memImages[id];
+    var db = await imgDb();
+    if (!db) return null;
+    return new Promise(function (resolve) {
+      try {
+        var req = db.transaction(IMG_STORE, "readonly").objectStore(IMG_STORE).get(id);
+        req.onsuccess = function () { resolve(req.result || null); };
+        req.onerror = function () { resolve(null); };
+      } catch (e) {
+        resolve(null);
+      }
+    });
+  }
+
+  async function imageDeleteChat(chatId) {
+    Object.keys(memImages).forEach(function (k) { if (memImages[k].chatId === chatId) delete memImages[k]; });
+    var db = await imgDb();
+    if (!db) return;
+    try {
+      var tx = db.transaction(IMG_STORE, "readwrite");
+      var cursorReq = tx.objectStore(IMG_STORE).index("chatId").openCursor(IDBKeyRange.only(chatId));
+      cursorReq.onsuccess = function () {
+        var cur = cursorReq.result;
+        if (cur) { cur.delete(); cur.continue(); }
+      };
+    } catch (e) { /* nothing more to do */ }
+  }
+
+  function requestPersistentStorage() {
+    if (persistAsked) return;
+    persistAsked = true;
+    try {
+      if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(function () {});
+    } catch (e) { /* optional */ }
+  }
+
+  function imageItemToBlob(item) {
+    if (!item || typeof item !== "object") return null;
+    var b64 = typeof item.b64_json === "string" ? item.b64_json : null;
+    var type = typeof item.media_type === "string" && /^image\/[\w.+-]+$/.test(item.media_type) ? item.media_type : "image/png";
+    if (!b64 && typeof item.url === "string") {
+      var m = /^data:(image\/[\w.+-]+);base64,(.+)$/.exec(item.url);
+      if (m) { type = m[1]; b64 = m[2]; }
+    }
+    if (!b64) return null;
+    try {
+      var bin = atob(b64);
+      var bytes = new Uint8Array(bin.length);
+      for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      return new Blob([bytes], { type: type });
+    } catch (e) {
+      return null;
+    }
+  }
+
+  function blobToDataUrl(blob) {
+    return new Promise(function (resolve, reject) {
+      var r = new FileReader();
+      r.onload = function () { resolve(String(r.result)); };
+      r.onerror = function () { reject(r.error); };
+      r.readAsDataURL(blob);
+    });
+  }
+
+  /* ----- Rendering ----- */
+  function revokeThumbUrls() {
+    thumbUrls.forEach(function (u) { URL.revokeObjectURL(u); });
+    thumbUrls = [];
+  }
+
+  function buildImageGrid(m) {
+    var grid = document.createElement("div");
+    grid.className = "msg-images" + (m.images.length > 1 ? " multi" : "");
+    m.images.forEach(function (ref) {
+      var btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "img-thumb";
+      btn.setAttribute("aria-label", "Open image");
+      grid.appendChild(btn);
+      imageGet(ref && ref.id).then(function (rec) {
+        if (!rec || !rec.blob) {
+          btn.disabled = true;
+          btn.classList.add("img-missing");
+          btn.textContent = "This image isn't stored on this device.";
+          return;
+        }
+        // Always an <img>, never inline markup: an SVG's scripts can't run here.
+        var url = URL.createObjectURL(rec.blob);
+        thumbUrls.push(url);
+        var img = document.createElement("img");
+        img.alt = "Generated image";
+        img.addEventListener("load", function () { scrollToBottom(false); });
+        img.src = url;
+        btn.appendChild(img);
+        btn.addEventListener("click", function () { openViewer(rec); });
+      });
+    });
+    return grid;
+  }
+
+  /* ----- Options row ----- */
+  function readImageOpts() {
+    var all = readJson(KEYS.imageOpts, {});
+    return all && typeof all === "object" && !Array.isArray(all) ? all : {};
+  }
+
+  function saveImageOpt(model, key, value) {
+    var all = readImageOpts();
+    var o = all[model] && typeof all[model] === "object" ? all[model] : {};
+    o[key] = value;
+    all[model] = o;
+    storageSet(KEYS.imageOpts, JSON.stringify(all));
+  }
+
+  // The newest generated image in this chat, if it can be sent back as a reference.
+  function lastGeneratedImage() {
+    for (var i = history.length - 1; i >= 0; i--) {
+      var m = history[i];
+      if (m.role === "assistant" && Array.isArray(m.images) && m.images.length) {
+        var ref = m.images[0];
+        return ref && ref.id && !/svg/.test(ref.type || "") ? ref : null;
+      }
+    }
+    return null;
+  }
+
+  function addOptionSelect(param, anyLabel, values, labelFor, saved, model) {
+    var sel = document.createElement("select");
+    sel.className = "img-opt";
+    sel.setAttribute("data-param", param);
+    sel.setAttribute("aria-label", anyLabel.replace(/^Any /, ""));
+    if (anyLabel) addOption(sel, "", anyLabel);
+    values.forEach(function (v) { addOption(sel, String(v), labelFor(v)); });
+    var want = saved[param] !== undefined ? String(saved[param]) : (anyLabel ? "" : String(values[0]));
+    sel.value = want;
+    if (sel.value !== want) sel.value = anyLabel ? "" : String(values[0]);
+    sel.addEventListener("change", function () { saveImageOpt(model, param, sel.value); });
+    imageOptsEl.appendChild(sel);
+  }
+
+  function renderImageOptions() {
+    var model = storageGet(KEYS.model) || "";
+    var e = storageGet(KEYS.apiKey) ? imageEntry(model) : null;
+    imageOptsEl.innerHTML = "";
+    imageOptsEl.hidden = !e;
+    if (!e) return;
+    var saved = readImageOpts()[model] || {};
+    var same = function (v) { return v; };
+    [["aspect_ratio", "Any shape"], ["resolution", "Any size"], ["quality", "Any quality"]].forEach(function (pair) {
+      var d = e.params[pair[0]];
+      if (!d || d.type !== "enum" || !Array.isArray(d.values)) return;
+      var values = d.values.filter(function (v) { return typeof v === "string" && v !== "auto"; });
+      if (values.length) addOptionSelect(pair[0], pair[1], values, same, saved, model);
+    });
+    var nd = e.params.n;
+    if (nd && nd.type === "range" && typeof nd.max === "number" && nd.max > 1) {
+      var counts = [];
+      for (var c = Math.max(1, nd.min || 1); c <= Math.min(nd.max, 4); c++) counts.push(c);
+      addOptionSelect("n", "", counts, function (v) { return v + (v === 1 ? " image" : " images"); }, saved, model);
+    }
+    var refs = e.params.input_references;
+    if (refs && typeof refs.max === "number" && refs.max > 0 && lastGeneratedImage()) {
+      var label = document.createElement("label");
+      label.className = "img-refine";
+      var cb = document.createElement("input");
+      cb.type = "checkbox";
+      cb.id = "img-refine";
+      cb.checked = saved.refine !== false;
+      cb.addEventListener("change", function () { saveImageOpt(model, "refine", cb.checked); });
+      label.appendChild(cb);
+      label.appendChild(document.createTextNode("Refine last image"));
+      imageOptsEl.appendChild(label);
+    }
+  }
+
+  function imageRequestOptions() {
+    var out = {};
+    var sels = imageOptsEl.querySelectorAll("select.img-opt");
+    for (var i = 0; i < sels.length; i++) {
+      var p = sels[i].getAttribute("data-param"), v = sels[i].value;
+      if (!v) continue;
+      if (p === "n") {
+        var n = parseInt(v, 10);
+        if (n > 1) out.n = n;
+      } else {
+        out[p] = v;
+      }
+    }
+    return out;
+  }
+
+  /* ----- Generating ----- */
+  // Files a finished reply into the chat it was requested from, even if the
+  // user has since switched to another chat.
+  function fileReply(entry, sendChatId, placeholderEl) {
+    if (currentChatId === sendChatId) {
+      if (placeholderEl) placeholderEl.remove();
+      history.push(entry);
+      persistHistory();
+      appendMessageEl(entry);
+    } else {
+      var other = loadChat(sendChatId);
+      other.push(entry);
+      saveChat(sendChatId, other);
+      var meta = chatMeta(sendChatId);
+      if (meta) { meta.updated = Date.now(); meta.count = other.length; meta.model = entry.model || meta.model; }
+      storageSet(KEYS.chats, JSON.stringify(chats));
+    }
+  }
+
+  async function generateImage(prompt, model, key, sendChatId) {
+    var body = { model: model, prompt: prompt };
+    var opts = imageRequestOptions();
+    Object.keys(opts).forEach(function (k) { body[k] = opts[k]; });
+    var refineBox = document.getElementById("img-refine");
+    var refineFrom = refineBox && refineBox.checked ? lastGeneratedImage() : null;
+
+    setStreamingUI(true);
+    currentAbort = new AbortController();
+    var placeholder = appendMessageEl({ role: "assistant", content: "" });
+    placeholder.classList.add("generating");
+    var tStart = performance.now();
+    var tick = function () {
+      placeholder.textContent = (refineFrom ? "Refining image… " : "Generating image… ") + Math.round((performance.now() - tStart) / 1000) + "s";
+    };
+    tick();
+    var timer = setInterval(tick, 1000);
+    scrollToBottom(true);
+
+    try {
+      if (refineFrom) {
+        var source = await imageGet(refineFrom.id);
+        if (source && source.blob) {
+          body.input_references = [{ type: "image_url", image_url: { url: await blobToDataUrl(source.blob) } }];
+        }
+      }
+      var res = await fetch(OPENROUTER + "/images", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": "Bearer " + key,
+          "X-Title": APP_TITLE
+        },
+        body: JSON.stringify(body),
+        signal: currentAbort.signal
+      });
+      if (!res.ok) {
+        var errText = await safeReadError(res);
+        throw new Error("HTTP " + res.status + (errText ? ": " + errText : ""));
+      }
+      var json = await res.json();
+      var items = json && Array.isArray(json.data) ? json.data : [];
+      var refs = [];
+      var allSaved = true;
+      for (var i = 0; i < items.length; i++) {
+        var blob = imageItemToBlob(items[i]);
+        if (!blob) continue;
+        var id = newId();
+        if (!(await imagePut({ id: id, chatId: sendChatId, blob: blob, type: blob.type, created: Date.now() }))) allSaved = false;
+        refs.push({ id: id, type: blob.type });
+      }
+      if (!refs.length) throw new Error("the model returned no images");
+      requestPersistentStorage();
+      fileReply({
+        role: "assistant", content: "", images: refs, model: model, requested: model,
+        usage: json.usage && typeof json.usage === "object" ? json.usage : null,
+        timing: { total: Math.round(performance.now() - tStart) },
+        refined: !!body.input_references
+      }, sendChatId, placeholder);
+      if (!allSaved && !imgStorageWarned) {
+        imgStorageWarned = true;
+        showError("This device couldn't store the image, so it will be lost when the app closes. Open it and tap Save to keep it.", false);
+      }
+    } catch (err) {
+      if (currentChatId === sendChatId) {
+        placeholder.remove();
+        showError(err && err.name === "AbortError"
+          ? "Stopped. A cancelled image isn't billed."
+          : "Image generation failed: " + (err && err.message ? err.message : "unknown error"), true);
+      }
+    } finally {
+      clearInterval(timer);
+      currentAbort = null;
+      setStreamingUI(false);
+      scrollToBottom(false);
+    }
+  }
+
+  /* ----- Full-screen viewer ----- */
+  var viewerEl = document.getElementById("image-viewer");
+  var viewerImg = document.getElementById("viewer-img");
+  var viewerStatus = document.getElementById("viewer-status");
+  var viewerSaveBtn = document.getElementById("viewer-save");
+  var viewerShareBtn = document.getElementById("viewer-share");
+  var viewerCopyBtn = document.getElementById("viewer-copy");
+  var viewerCloseBtn = document.getElementById("viewer-close");
+  var viewerRec = null;
+  var viewerUrl = null;
+
+  function imageFileName(type) {
+    var ext = (String(type).split("/")[1] || "png").replace("svg+xml", "svg").replace("jpeg", "jpg");
+    var stamp = new Date().toISOString().slice(0, 19).replace(/[-:]/g, "").replace("T", "-");
+    return "openrouter-image-" + stamp + "." + ext;
+  }
+
+  function imageFile(rec) {
+    return new File([rec.blob], imageFileName(rec.type), { type: rec.type });
+  }
+
+  function canShareImage(rec) {
+    try {
+      return !!(navigator.share && navigator.canShare && navigator.canShare({ files: [imageFile(rec)] }));
+    } catch (e) {
+      return false;
+    }
+  }
+
+  function openViewer(rec) {
+    viewerRec = rec;
+    viewerUrl = URL.createObjectURL(rec.blob);
+    viewerImg.src = viewerUrl;
+    viewerStatus.textContent = "";
+    viewerShareBtn.hidden = !canShareImage(rec);
+    viewerCopyBtn.hidden = /svg/.test(rec.type) || !(window.ClipboardItem && navigator.clipboard && navigator.clipboard.write);
+    viewerEl.hidden = false;
+    try { window.history.pushState({ orcViewer: true }, ""); } catch (e) { /* ignore */ }
+  }
+
+  function hideViewer() {
+    viewerEl.hidden = true;
+    viewerImg.removeAttribute("src");
+    if (viewerUrl) URL.revokeObjectURL(viewerUrl);
+    viewerUrl = null;
+    viewerRec = null;
+  }
+
+  function closeViewer() {
+    if (window.history.state && window.history.state.orcViewer) window.history.back();
+    else hideViewer();
+  }
+
+  function toPng(blob) {
+    return createImageBitmap(blob).then(function (bmp) {
+      var canvas = document.createElement("canvas");
+      canvas.width = bmp.width;
+      canvas.height = bmp.height;
+      canvas.getContext("2d").drawImage(bmp, 0, 0);
+      return new Promise(function (resolve, reject) {
+        canvas.toBlob(function (b) { if (b) resolve(b); else reject(new Error("conversion failed")); }, "image/png");
+      });
+    });
+  }
+
+  viewerSaveBtn.addEventListener("click", function () {
+    if (!viewerRec) return;
+    var a = document.createElement("a");
+    a.href = viewerUrl;
+    a.download = imageFileName(viewerRec.type);
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    viewerStatus.textContent = "Saved to your downloads.";
+  });
+
+  viewerShareBtn.addEventListener("click", function () {
+    if (!viewerRec) return;
+    navigator.share({ files: [imageFile(viewerRec)] }).catch(function (e) {
+      if (e && e.name !== "AbortError") viewerStatus.textContent = "Couldn't share: " + e.message;
+    });
+  });
+
+  viewerCopyBtn.addEventListener("click", function () {
+    if (!viewerRec) return;
+    var blob = viewerRec.blob;
+    (blob.type === "image/png" ? Promise.resolve(blob) : toPng(blob))
+      .then(function (png) { return navigator.clipboard.write([new ClipboardItem({ "image/png": png })]); })
+      .then(function () { viewerStatus.textContent = "Copied."; })
+      .catch(function (e) { viewerStatus.textContent = "Couldn't copy: " + (e && e.message ? e.message : "not supported here"); });
+  });
+
+  viewerCloseBtn.addEventListener("click", closeViewer);
+  window.addEventListener("popstate", function () {
+    if (!viewerEl.hidden) hideViewer();
+  });
+
   /* ---------------- Sending / streaming ---------------- */
   function buildApiMessages() {
     var out = [];
     var sys = storageGet(KEYS.systemPrompt);
     if (sys) out.push({ role: "system", content: sys });
     history.forEach(function (m) {
-      if (m.role === "user" || m.role === "assistant") out.push({ role: m.role, content: m.content });
+      if (m.role !== "user" && m.role !== "assistant") return;
+      var content = m.content;
+      // Text models can't see generated images; tell them one was made here
+      // rather than sending an empty turn, which some providers reject.
+      if (m.role === "assistant" && !content && Array.isArray(m.images) && m.images.length) {
+        content = "(An image model generated " + (m.images.length === 1 ? "an image" : m.images.length + " images") + " here.)";
+      }
+      out.push({ role: m.role, content: content });
     });
     return out;
   }
@@ -2475,6 +3177,11 @@
     var apiMessages = buildApiMessages();
     var sendChatId = currentChatId;   // the chat this reply belongs to, even if the user switches away
 
+    if (isImageModel(model)) {
+      await generateImage(text, model, key, sendChatId);
+      return;
+    }
+
     setStreamingUI(true);
     currentAbort = new AbortController();
 
@@ -2511,20 +3218,7 @@
     function finish(entry) {
       entry.timing = timing();
       if (renderTimer) { clearTimeout(renderTimer); renderTimer = null; }
-      if (currentChatId === sendChatId) {
-        assistantEl.remove();
-        history.push(entry);
-        persistHistory();
-        appendMessageEl(entry);
-      } else {
-        // User moved to another chat mid-reply: file the reply where it belongs.
-        var other = loadChat(sendChatId);
-        other.push(entry);
-        saveChat(sendChatId, other);
-        var meta = chatMeta(sendChatId);
-        if (meta) { meta.updated = Date.now(); meta.count = other.length; meta.model = entry.model || meta.model; }
-        storageSet(KEYS.chats, JSON.stringify(chats));
-      }
+      fileReply(entry, sendChatId, assistantEl);
     }
 
     try {
@@ -2984,6 +3678,7 @@
   function browseMatches(m) {
     if (browseProvider.value && m.provider !== browseProvider.value) return false;
     var cap = browseCap.value;
+    if (cap === "image" && !m.imageGen) return false;
     if (cap === "vision" && !m.vision) return false;
     if (cap === "reasoning" && !m.reasoning) return false;
     if (cap === "tools" && !m.tools) return false;
@@ -3040,7 +3735,11 @@
         : "Intelligence scores aren't available at the moment."));
     }
     var orDesc = describeOR(m);
-    if (orDesc) box.appendChild(el("div", "note", "OpenRouter: " + orDesc));
+    var orNote = el("div", "note", "OpenRouter: " + orDesc);
+    if (orDesc) box.appendChild(orNote);
+    if (m.imageGen && !(m.id in imagePrices)) {
+      loadImagePrice(m.id, function () { orNote.textContent = "OpenRouter: " + describeOR(m); });
+    }
     var current = m.id === (storageGet(KEYS.model) || "");   // the saved model, not an unsaved pick in settings
     var use = el("button", "btn primary", current ? "Current model" : "Use this model");
     use.type = "button";
@@ -3066,6 +3765,7 @@
     else if (m.outPrice !== null) sub.push(fmtPrice(m.inPrice) + " / " + fmtPrice(m.outPrice) + " per 1M");
     var ctx = fmtContext(m.context);
     if (ctx) sub.push(ctx);
+    if (m.imageGen) sub.push("image generation");
     if (m.vision) sub.push("vision");
     if (m.reasoning) sub.push("reasoning");
     if (m.tools) sub.push("tools");
