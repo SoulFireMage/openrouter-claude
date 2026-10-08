@@ -55,6 +55,15 @@ const fakeFetch = () => {
       model_creator: { name: "OpenAI", slug: "openai" }, evaluations: {} },
     { junk: true }, null
   ] };
+  // Every OpenRouter org -> Artificial Analysis creator alias the matcher
+  // knows, plus a same-name pair, so a typo in any mapping fails a check.
+  window.__aliasPairs = [
+    ["allenai", "ai2"], ["stepfun-ai", "stepfun"], ["arcee-ai", "arcee"], ["meituan", "longcat"], ["nex-agi", "nex"],
+    ["lgai", "lg"], ["meta-llama", "meta"], ["mistralai", "mistral"], ["x-ai", "xai"], ["qwen", "alibaba"],
+    ["moonshotai", "kimi"], ["z-ai", "zai"], ["amazon", "aws"], ["microsoft", "azure"], ["nousresearch", "nous-research"],
+    ["ibm-granite", "ibm"], ["bytedance-seed", "bytedance_seed"], ["ai21", "ai21-labs"], ["liquid", "liquidai"],
+    ["deepseek", "deepseek"]
+  ];
   window.__imgRequests = [];
   window.__tinyPng = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==";
   window.__imageModels = [
@@ -77,6 +86,15 @@ const fakeFetch = () => {
       if (mode === "404") return new Response("Not found", { status: 404 });
       if (mode === "bad") return new Response("{not json", { status: 200 });
       if (mode === "empty") return new Response(JSON.stringify({ fetchedAt: new Date().toISOString(), data: [] }), { status: 200 });
+      if (mode === "missing") return new Response(JSON.stringify({ fetchedAt: new Date().toISOString() }), { status: 200 });
+      if (mode === "notarray") return new Response(JSON.stringify({ fetchedAt: new Date().toISOString(), data: { models: [] } }), { status: 200 });
+      if (mode === "aliases") {
+        const data = window.__aliasPairs.map(([, aa], i) => ({ id: "al" + i, name: "Alias Probe " + i, slug: "alias-probe-" + i,
+          model_creator: { name: aa, slug: aa }, evaluations: { artificial_analysis_intelligence_index: 10 + i } }));
+        data.push({ id: "al99", name: "Alias Probe 99", slug: "alias-probe-99", model_creator: { name: "Someone", slug: "someone" },
+          evaluations: { artificial_analysis_intelligence_index: 99 } });
+        return new Response(JSON.stringify({ fetchedAt: new Date().toISOString(), data }), { status: 200, headers: { "Content-Type": "application/json" } });
+      }
       return new Response(JSON.stringify({ source: "Artificial Analysis", fetchedAt: new Date(Date.now() - 2 * 86400000).toISOString(), data: window.__aaFixture.data }),
         { status: 200, headers: { "Content-Type": "application/json" } });
     }
@@ -112,6 +130,12 @@ const fakeFetch = () => {
         usage: { prompt_tokens: 0, completion_tokens: 100, cost: 0.04 * n } });
     }
 
+    if (String(url).endsWith("/models") && localStorage.getItem("__orMode") === "aliases") {
+      const data = window.__aliasPairs.map(([org], i) => ({ id: org + "/alias-probe-" + i, name: "Probe" + i + ": Alias Probe " + i,
+        pricing: { prompt: "0.000001", completion: "0.000002" } }));
+      data.push({ id: "unknownorg/alias-probe-99", name: "Unknown: Alias Probe 99", pricing: { prompt: "0.000001", completion: "0.000002" } });
+      return new Response(JSON.stringify({ data }), { status: 200, headers: { "Content-Type": "application/json" } });
+    }
     if (String(url).endsWith("/models")) {
       return new Response(JSON.stringify({ data: [
         { id: "openai/gpt-4o-mini", name: "OpenAI: GPT-4o mini", context_length: 128000,
@@ -879,6 +903,30 @@ await page.waitForFunction(() => document.getElementById("chat-title").textConte
 await page.waitForTimeout(300);
 check("img: deleting the chat deletes its images", (await idbCount()) === 0);
 await page.evaluate(() => localStorage.removeItem("__imgMode"));
+
+
+// ---------- Copilot follow-ups on #14 and #15 ----------
+for (const mode of ["missing", "notarray"]) {
+  await page.evaluate((m) => localStorage.setItem("__aaMode", m), mode);
+  await page.reload({ waitUntil: "load" });
+  await page.waitForTimeout(400);
+  await page.click("#open-settings");
+  check("aa: " + mode + " model list reported, no scores", /no model list/.test(await page.textContent("#aa-status")) && await page.$eval("#filter-intel", e => e.hidden), await page.textContent("#aa-status"));
+  await page.click("#save-settings");
+}
+
+await page.evaluate(() => { localStorage.setItem("__aaMode", "aliases"); localStorage.setItem("__orMode", "aliases"); localStorage.removeItem("orc_filters"); });
+await page.reload({ waitUntil: "load" });
+await page.click("#open-settings");
+await page.waitForFunction(() => !document.getElementById("filter-intel").hidden);
+const aliasPairs = await page.evaluate(() => window.__aliasPairs);
+const aliasLabels = await page.$$eval("#model-select option", os => Object.fromEntries(os.map(o => [o.value, o.textContent])));
+const aliasMisses = aliasPairs.filter(([org], i) => !(aliasLabels[org + "/alias-probe-" + i] || "").endsWith("· AI " + (10 + i)))
+  .map(([org, aa]) => org + "->" + aa);
+check("aa: every creator alias matches (" + aliasPairs.length + " pairs)", aliasMisses.length === 0, "missed: " + JSON.stringify(aliasMisses));
+check("aa: an unknown org never borrows another creator's score", !/AI/.test(aliasLabels["unknownorg/alias-probe-99"] || "AI"), aliasLabels["unknownorg/alias-probe-99"]);
+await page.click("#save-settings");
+await page.evaluate(() => { localStorage.removeItem("__aaMode"); localStorage.removeItem("__orMode"); });
 
 check("no page errors", errors.length === 0, JSON.stringify(errors));
 console.log(JSON.stringify(results, null, 2));
