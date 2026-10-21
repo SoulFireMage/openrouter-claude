@@ -982,6 +982,65 @@ check("aa: an unknown org never borrows another creator's score", !/AI/.test(ali
 await page.click("#save-settings");
 await page.evaluate(() => { localStorage.removeItem("__aaMode"); localStorage.removeItem("__orMode"); });
 
+
+// ---------- Export reachability and per-chat export ----------
+const savedStorage = await page.evaluate(() => JSON.stringify(Object.fromEntries(Object.keys(localStorage).map(k => [k, localStorage.getItem(k)]))));
+await page.evaluate(() => {
+  const idx = JSON.parse(localStorage.getItem("orc_chats") || "[]");
+  for (let i = 0; i < 60; i++) {
+    const id = "bulk" + i;
+    idx.push({ id, title: "Bulk chat " + i, created: 1, updated: 1000 - i, model: "x/y", count: 2 });
+    localStorage.setItem("orc_chat_" + id, JSON.stringify([{ role: "user", content: "question " + i }, { role: "assistant", content: "answer " + i }]));
+  }
+  localStorage.setItem("orc_chats", JSON.stringify(idx));
+  localStorage.removeItem("orc_current_chat");
+});
+await page.reload({ waitUntil: "load" });
+await page.click("#open-chats");
+await page.waitForTimeout(300);
+const reach = await page.evaluate(() => {
+  const b = document.getElementById("export-btn").getBoundingClientRect();
+  const list = document.getElementById("chat-list");
+  return { onScreen: b.top >= 0 && b.bottom <= innerHeight, listScrolls: list.scrollHeight > list.clientHeight };
+});
+check("export: drawer buttons stay on screen with a long chat list", reach.onScreen && reach.listScrolls, JSON.stringify(reach));
+
+await page.click("#new-chat-btn");
+await page.click("#open-settings");
+check("export: an empty chat can't be exported", await page.$eval("#export-chat", b => b.disabled) && (await page.textContent("#chat-export-status")) === "Nothing to export until this chat has messages.", await page.textContent("#chat-export-status"));
+await page.click("#save-settings");
+
+await page.click("#open-chats");
+await page.click('.chat-row:has(.chat-title:text-is("Bulk chat 5")) .chat-open');
+await page.evaluate(() => {
+  window.__sharedJson = [];
+  Object.defineProperty(navigator, "canShare", { configurable: true, value: () => true });
+  Object.defineProperty(navigator, "share", { configurable: true, value: async (d) => {
+    for (const f of d.files) window.__sharedJson.push([f.name, f.type, await f.text()]);
+  } });
+});
+await page.click("#open-settings");
+check("export: export and share offered for a chat with messages", !(await page.$eval("#export-chat", b => b.disabled)) && !(await page.$eval("#share-chat", b => b.hidden)));
+const [dlChat] = await Promise.all([page.waitForEvent("download"), page.click("#export-chat")]);
+const chatFileText = (await import("fs")).readFileSync(await dlChat.path(), "utf8");
+const chatFile = JSON.parse(chatFileText);
+check("export: this-chat file is named after the chat", /^openrouter-chat-bulk-chat-5-\d{4}-\d{2}-\d{2}\.json$/.test(dlChat.suggestedFilename()), dlChat.suggestedFilename());
+check("export: this-chat file holds just that chat, no profiles", chatFile.format === "openrouter-chat" && chatFile.chats.length === 1 && chatFile.chats[0].id === "bulk5" &&
+  JSON.stringify(chatFile.chats[0].messages) === JSON.stringify([{ role: "user", content: "question 5" }, { role: "assistant", content: "answer 5" }]) &&
+  Array.isArray(chatFile.profiles) && chatFile.profiles.length === 0 && !chatFileText.includes("sk-or-v1"), chatFileText.slice(0, 200));
+check("export: status confirms the export", (await page.textContent("#chat-export-status")) === "Exported “Bulk chat 5” (2 messages).", await page.textContent("#chat-export-status"));
+await page.click("#share-chat");
+await page.waitForFunction(() => window.__sharedJson.length === 1);
+const sharedChat = await page.evaluate(() => window.__sharedJson[0]);
+check("export: share hands over the same single-chat file", sharedChat[0] === dlChat.suggestedFilename() && sharedChat[1] === "application/json" && JSON.parse(sharedChat[2]).chats[0].id === "bulk5", JSON.stringify(sharedChat).slice(0, 160));
+await page.click("#save-settings");
+await page.click("#open-chats");
+await page.setInputFiles("#import-file", { name: "one.json", mimeType: "application/json", buffer: Buffer.from(chatFileText) });
+await page.waitForFunction(() => /^Imported/.test(document.getElementById("transfer-status").textContent));
+check("export: a single-chat file imports cleanly", (await page.textContent("#transfer-status")) === "Imported 0 chats, 1 already here.", await page.textContent("#transfer-status"));
+await page.evaluate((saved) => { localStorage.clear(); for (const [k, v] of Object.entries(JSON.parse(saved))) localStorage.setItem(k, v); }, savedStorage);
+await page.reload({ waitUntil: "load" });
+
 check("no page errors", errors.length === 0, JSON.stringify(errors));
 console.log(JSON.stringify(results, null, 2));
 await browser.close();

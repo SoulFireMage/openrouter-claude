@@ -27,8 +27,12 @@ just static files.
 - **Retry** on any failed request, including one left dangling by a reload.
 - Export and import: the chats drawer writes every chat and profile to one
   JSON file (never the API key), with a Share button on phones that support
-  it. Import merges: unchanged chats are skipped, changed ones are added as
-  copies, nothing already on the device is overwritten.
+  it. The drawer's Export, Share and Import buttons stay on screen however
+  long the chat list is. To export only the conversation you're in, use
+  Export this chat (or Share this chat) in settings; it writes the same
+  format, so either kind of file can be imported. Import merges: unchanged
+  chats are skipped, changed ones are added as copies, nothing already on the
+  device is overwritten. Generated images aren't included in exports.
 - Profiles: named snapshots of model, system prompt and picker filters,
   stored on the device. Each profile records which of those it sets, so a
   prompt-only persona can be applied without changing the model. The starred
