@@ -46,6 +46,9 @@ just static files.
   button in the header, sorts and filters the whole catalogue by
   intelligence, coding, maths, price, speed, context or age, with a briefing
   card per model.
+- Each chat request sends the chat's id as OpenRouter's `session_id`, so a
+  chat's requests are grouped in OpenRouter's logs and in Broadcast traces
+  (for example to a Hugging Face bucket).
 - Per-reply footer showing the model and provider that served it, token
   counts and cost as reported by OpenRouter, time to first token, and
   generation speed in tokens per second.
