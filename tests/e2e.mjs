@@ -1040,6 +1040,46 @@ check("export: a single-chat file imports cleanly", (await page.textContent("#tr
 await page.evaluate((saved) => { localStorage.clear(); for (const [k, v] of Object.entries(JSON.parse(saved))) localStorage.setItem(k, v); }, savedStorage);
 await page.reload({ waitUntil: "load" });
 
+
+// Copilot on #20: with storage full, exports must still include the open
+// chat's newest messages, which then exist only in memory.
+await page.evaluate(() => localStorage.setItem("orc_model", "anthropic/claude-sonnet-4"));
+await page.reload({ waitUntil: "load" });
+await page.click("#open-chats");
+await page.click("#new-chat-btn");
+await page.evaluate(() => window.__scenarios.push({ kind: "ok", text: "saved reply" }));
+await page.fill("#composer", "saved question");
+await page.click("#send-btn");
+await page.waitForFunction(() => document.querySelectorAll(".msg.assistant .meta").length === 1);
+const fullChatId = await page.evaluate(() => localStorage.getItem("orc_current_chat"));
+await page.evaluate(() => {
+  const real = Storage.prototype.setItem;
+  window.__realSetItem = real;
+  Storage.prototype.setItem = function (k, v) {
+    if (String(k).startsWith("orc_chat")) throw new DOMException("Quota exceeded", "QuotaExceededError");
+    return real.call(this, k, v);
+  };
+});
+await page.evaluate(() => window.__scenarios.push({ kind: "ok", text: "unsaved reply" }));
+await page.fill("#composer", "unsaved question");
+await page.click("#send-btn");
+await page.waitForFunction(() => document.querySelectorAll(".msg.assistant .meta").length === 2);
+check("export: storage-full warning shown", (await page.textContent("#messages")).includes("storage is full"));
+check("export: setup has messages only in memory", (await page.evaluate((id) => JSON.parse(localStorage.getItem("orc_chat_" + id)).length, fullChatId)) === 2);
+await page.click("#open-settings");
+const [dlFull] = await Promise.all([page.waitForEvent("download"), page.click("#export-chat")]);
+const fullChatFile = JSON.parse((await import("fs")).readFileSync(await dlFull.path(), "utf8"));
+check("export: this-chat export includes unsaved messages", JSON.stringify(fullChatFile.chats[0].messages.map(m => m.content)) === JSON.stringify(["saved question", "saved reply", "unsaved question", "unsaved reply"]), JSON.stringify(fullChatFile.chats[0].messages.map(m => m.content)));
+check("export: status count matches the file", (await page.textContent("#chat-export-status")).endsWith("(4 messages)."), await page.textContent("#chat-export-status"));
+await page.click("#save-settings");
+await page.click("#open-chats");
+const [dlAllFull] = await Promise.all([page.waitForEvent("download"), page.click("#export-btn")]);
+const allFullFile = JSON.parse((await import("fs")).readFileSync(await dlAllFull.path(), "utf8"));
+const openInAll = allFullFile.chats.find(c => c.id === fullChatId);
+check("export: full export includes the open chat's unsaved messages", openInAll && openInAll.messages.length === 4, JSON.stringify(openInAll && openInAll.messages.length));
+await page.evaluate(() => { Storage.prototype.setItem = window.__realSetItem; });
+await page.click("#chats-overlay", { position: { x: 380, y: 400 } });
+
 check("no page errors", errors.length === 0, JSON.stringify(errors));
 console.log(JSON.stringify(results, null, 2));
 await browser.close();
