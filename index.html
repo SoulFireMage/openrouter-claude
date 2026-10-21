@@ -3262,7 +3262,9 @@
           model: model,
           messages: apiMessages,
           stream: true,
-          usage: { include: true }
+          usage: { include: true },
+          // Groups this chat's requests in OpenRouter's logs and Broadcast traces.
+          session_id: sendChatId
         }),
         signal: currentAbort.signal
       });

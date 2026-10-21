@@ -251,6 +251,7 @@ check("libraries loaded", await page.evaluate(() => !!(window.marked && window.D
 check("meta shows served model via provider, tokens, cost", html.includes("anthropic/claude-sonnet-4 via MockProvider") && !html.includes("requested") && html.includes("tokens") && html.includes("$0.0004"), html);
 let req = await page.evaluate(() => window.__requests[0]);
 check("request has system + usage + stream", req.messages[0].role === "system" && req.messages[0].content === "Be terse." && req.usage.include === true && req.stream === true, JSON.stringify(req));
+check("request carries the chat id as session_id", req.session_id === (await page.evaluate(() => localStorage.getItem("orc_current_chat"))) && !!req.session_id, JSON.stringify(req));
 
 // 1b. Rich markdown + LaTeX + injection attempts
 await page.evaluate(() => window.__scenarios.push({ kind: "ok", text: [
