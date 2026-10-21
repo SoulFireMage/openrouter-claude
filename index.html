@@ -1805,7 +1805,10 @@
       version: EXPORT_VERSION,
       exportedAt: new Date().toISOString(),
       chats: list.map(function (c) {
-        return { id: c.id, title: c.title, created: c.created, updated: c.updated, model: c.model, messages: loadChat(c.id) };
+        // The open chat comes from memory: if storage is full, its newest
+        // messages exist only there and must not be lost from the export.
+        var messages = c.id === currentChatId ? cleanMessages(history).slice() : loadChat(c.id);
+        return { id: c.id, title: c.title, created: c.created, updated: c.updated, model: c.model, messages: messages };
       }),
       profiles: chatId ? [] : profiles.map(function (p) {
         return { id: p.id, name: p.name, model: p.model, systemPrompt: p.systemPrompt, filters: p.filters, includes: p.includes, created: p.created, updated: p.updated };
