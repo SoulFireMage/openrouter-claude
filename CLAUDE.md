@@ -39,6 +39,13 @@ phone, so every change ships as a PR that is merged to `main`, which deploys.
   DOMPurify; raw HTML from the model is escaped to text. Keep it that way.
 - Chat history entries are only `user` and `assistant`. Errors are transient
   UI and must never be stored or sent to the API.
+- An assistant entry may carry `reasoning` (the model's thinking, shown as
+  plain text, never markdown) and `interrupted` (why a kept partial reply
+  stopped). Only `role` and `content` are ever sent back; assistant turns
+  with empty content (thinking only) are skipped when building the request.
+- Reasoning streams as `delta.reasoning` and, for the same tokens,
+  `delta.reasoning_details`. Read one or the other, never both, or the
+  thinking is shown twice.
 - Artificial Analysis ids do not map to OpenRouter ids. Models are joined by
   creator alias plus name tokens (`joinAA` and helpers). Keep matching
   conservative: a wrong intelligence score is worse than a missing one.

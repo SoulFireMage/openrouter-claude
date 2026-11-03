@@ -24,6 +24,14 @@ just static files.
   one. A new chat is only saved once you send something. Switching chats
   stops any reply still streaming; the partial reply is kept in its own chat.
 - Streaming replies with a **Stop** button (partial text is kept).
+- **Thinking shown live** for reasoning models: a status line ("Waiting…",
+  then "Thinking… 42s · 900 words") until the reply starts, and the
+  reasoning kept in a fold-out above the reply.
+- **Nothing that arrived is lost**: if the connection drops, goes silent for
+  three minutes, or the model runs out of tokens while thinking, what came
+  back is kept and marked as interrupted, and Retry replaces it.
+- The screen is kept awake while a reply streams, so a long think isn't cut
+  off by the phone sleeping.
 - **Retry** on any failed request, including one left dangling by a reload.
 - Export and import: the chats drawer writes every chat and profile to one
   JSON file (never the API key), with a Share button on phones that support

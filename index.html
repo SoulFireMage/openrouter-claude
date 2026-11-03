@@ -129,13 +129,13 @@
 
   /* ---------- Rendered markdown ---------- */
   .msg p { margin: 0 0 10px; }
-  .msg > p:last-of-type { margin-bottom: 0; }
+  .msg > p:last-of-type, .msg-body > p:last-of-type { margin-bottom: 0; }
   .msg h1, .msg h2, .msg h3, .msg h4, .msg h5, .msg h6 {
     margin: 12px 0 6px;
     line-height: 1.3;
     font-weight: 600;
   }
-  .msg > :first-child { margin-top: 0; }
+  .msg > :first-child, .msg-body > :first-child { margin-top: 0; }
   .msg h1 { font-size: 1.25em; }
   .msg h2 { font-size: 1.15em; }
   .msg h3 { font-size: 1.05em; }
@@ -177,13 +177,39 @@
   }
   .msg .katex { font-size: 1.05em; }
 
-  .msg.assistant.streaming::after {
+  .msg.assistant.streaming .msg-body::after {
     content: "▍";
     color: var(--accent);
     animation: blink 1s steps(2) infinite;
   }
 
   @keyframes blink { to { visibility: hidden; } }
+
+  /* Reasoning ("thinking") shown above a reply, folded away by default. */
+  .thinking {
+    margin: 0 0 8px;
+    border-left: 2px solid var(--border);
+    padding-left: 8px;
+    font-size: 13px;
+    color: var(--text-muted);
+  }
+  .thinking > summary {
+    cursor: pointer;
+    list-style: none;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .thinking > summary::-webkit-details-marker { display: none; }
+  .thinking > summary::before { content: "▸ "; }
+  .thinking[open] > summary::before { content: "▾ "; }
+  .thinking.live > summary { color: var(--accent); }
+  .thinking-body {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    margin-top: 6px;
+    max-height: 50vh;
+    overflow-y: auto;
+  }
+  .msg .reply-note { font-size: 13px; color: var(--text-muted); font-style: italic; }
 
   .msg.error {
     background: rgba(226, 114, 91, 0.12);
@@ -1585,21 +1611,65 @@
       }
     }
     if (m.stopped) bits.push("stopped");
+    if (m.interrupted) bits.push("interrupted: " + m.interrupted);
     return bits.join(" · ");
+  }
+
+  function formatSeconds(ms) {
+    var s = Math.max(0, Math.round(ms / 1000));
+    return s < 60 ? s + "s" : Math.floor(s / 60) + "m " + (s % 60) + "s";
+  }
+
+  function countWords(text) {
+    var m = text.match(/\S+/g);
+    return m ? m.length : 0;
+  }
+
+  // The model's reasoning, as plain text (never markdown or HTML) inside a
+  // folded <details>, so a long think doesn't bury the reply.
+  function buildThinkingEl(reasoning, label) {
+    var details = document.createElement("details");
+    details.className = "thinking";
+    var summary = document.createElement("summary");
+    summary.textContent = label;
+    var body = document.createElement("div");
+    body.className = "thinking-body";
+    body.textContent = reasoning || "";
+    details.appendChild(summary);
+    details.appendChild(body);
+    return details;
+  }
+
+  function thoughtLabel(m) {
+    var words = countWords(m.reasoning);
+    var t = m.timing && typeof m.timing.think === "number" ? " for " + formatSeconds(m.timing.think) : "";
+    return "Thought" + t + " · " + words.toLocaleString() + (words === 1 ? " word" : " words");
   }
 
   function appendMessageEl(m) {
     var el = document.createElement("div");
     el.className = "msg " + m.role;
+    var hasReasoning = m.role === "assistant" && typeof m.reasoning === "string" && m.reasoning.length > 0;
     if (m.role === "assistant") {
-      el.innerHTML = renderMarkdown(m.content);
-      decorateCodeBlocks(el);
+      if (hasReasoning) el.appendChild(buildThinkingEl(m.reasoning, thoughtLabel(m)));
+      var bodyEl = document.createElement("div");
+      bodyEl.className = "msg-body";
+      if (m.content) {
+        bodyEl.innerHTML = renderMarkdown(m.content);
+        decorateCodeBlocks(bodyEl);
+      } else if (hasReasoning) {
+        var note = document.createElement("p");
+        note.className = "reply-note";
+        note.textContent = "No reply was written, only thinking. Tap above to read it.";
+        bodyEl.appendChild(note);
+      }
+      el.appendChild(bodyEl);
     } else {
       el.textContent = m.content;
     }
     var hasImages = m.role === "assistant" && Array.isArray(m.images) && m.images.length > 0;
     if (hasImages) el.appendChild(buildImageGrid(m));
-    if (m.content || hasImages) {
+    if (m.content || hasImages || hasReasoning) {
       var actions = document.createElement("div");
       actions.className = "msg-actions";
       var metaEl = document.createElement("span");
@@ -3236,9 +3306,63 @@
       if (m.role === "assistant" && !content && Array.isArray(m.images) && m.images.length) {
         content = "(An image model generated " + (m.images.length === 1 ? "an image" : m.images.length + " images") + " here.)";
       }
+      // A turn that is only thinking (the model never wrote a reply) is
+      // skipped: reasoning is never sent back, and empty turns get rejected.
+      if (m.role === "assistant" && !content) return;
       out.push({ role: m.role, content: content });
     });
     return out;
+  }
+
+  // Keep the screen on while a reply streams. A phone that sleeps mid-reply
+  // drops the connection, and a long think can take minutes. The lock is
+  // released when the page is hidden, so it is taken again on return.
+  var wakeLock = null;
+  async function acquireWakeLock() {
+    if (wakeLock || !isStreaming || !("wakeLock" in navigator) || document.visibilityState !== "visible") return;
+    try {
+      var lock = await navigator.wakeLock.request("screen");
+      if (!isStreaming) { lock.release().catch(function () {}); return; }
+      wakeLock = lock;
+      lock.addEventListener("release", function () { if (wakeLock === lock) wakeLock = null; });
+    } catch (e) {
+      wakeLock = null;   // refused (battery saver, unsupported): carry on without it
+    }
+  }
+  function releaseWakeLock() {
+    var lock = wakeLock;
+    wakeLock = null;
+    if (lock) lock.release().catch(function () {});
+  }
+  document.addEventListener("visibilitychange", function () {
+    if (document.visibilityState === "visible") acquireWakeLock();
+  });
+
+  // A stream that sends nothing at all for this long is treated as dead.
+  // OpenRouter sends keep-alive comments while a model is busy, and a model
+  // that is thinking streams its reasoning, so real silence means a dropped
+  // connection that the browser hasn't noticed.
+  // The tests shorten it through window.__orcStreamIdleMs.
+  function streamIdleMs() {
+    var t = Number(window.__orcStreamIdleMs);
+    return t > 0 ? t : 180000;
+  }
+
+  // Reasoning arrives as delta.reasoning (text) and, for the same tokens, as
+  // delta.reasoning_details. Use the plain field when present so nothing is
+  // shown twice; otherwise take the readable parts of the details.
+  function reasoningPiece(delta) {
+    if (!delta) return "";
+    if (typeof delta.reasoning === "string") return delta.reasoning;
+    if (Array.isArray(delta.reasoning_details)) {
+      return delta.reasoning_details.map(function (d) {
+        if (!d) return "";
+        if (d.type === "reasoning.text" && typeof d.text === "string") return d.text;
+        if (d.type === "reasoning.summary" && typeof d.summary === "string") return d.summary;
+        return "";
+      }).join("");
+    }
+    return "";
   }
 
   async function sendMessage(retrying) {
@@ -3246,6 +3370,13 @@
 
     var text;
     if (retrying) {
+      // Retrying after an interrupted reply replaces what was kept of it.
+      var tail = history[history.length - 1];
+      if (tail && tail.role === "assistant" && tail.interrupted) {
+        history.pop();
+        persistHistory();
+        renderHistory();
+      }
       var last = history[history.length - 1];
       if (!last || last.role !== "user") return;
       text = last.content;
@@ -3282,19 +3413,66 @@
 
     setStreamingUI(true);
     currentAbort = new AbortController();
+    var abortRef = currentAbort;
+    acquireWakeLock();
 
     var assistantEl = appendMessageEl({ role: "assistant", content: "" });
     assistantEl.classList.add("streaming");
+    var bodyEl = assistantEl.querySelector(".msg-body");
+    // Status line until the reply starts: waiting, then thinking. It becomes
+    // the fold-out holding the reasoning.
+    var thinkingEl = buildThinkingEl("", "Waiting for the model… 0s");
+    thinkingEl.classList.add("live");
+    var thinkingSummary = thinkingEl.querySelector("summary");
+    var thinkingBody = thinkingEl.querySelector(".thinking-body");
+    assistantEl.insertBefore(thinkingEl, bodyEl);
     scrollToBottom(true);
 
     var fullText = "";
+    var reasoning = "";
     var usage = null;
+    var finishReason = null;
     var tStart = performance.now();
-    var tFirst = null;
+    var tFirst = null;          // first token of any kind, reasoning included
     var tLast = null;
+    var tThinkStart = null;
+    var tThinkEnd = null;
     var servedModel = null;
     var servedProvider = null;
     var renderTimer = null;
+    var stalled = false;
+    var idleTimer = null;
+    var idleMs = streamIdleMs();
+
+    function updateStatus() {
+      if (fullText) return;
+      var now = performance.now();
+      if (reasoning) {
+        thinkingSummary.textContent = "Thinking… " + formatSeconds(now - tThinkStart) + " · " + countWords(reasoning).toLocaleString() + " words";
+      } else {
+        thinkingSummary.textContent = (tFirst === null ? "Waiting for the model… " : "Thinking… ") + formatSeconds(now - tStart);
+      }
+    }
+    var statusTimer = setInterval(updateStatus, 1000);
+
+    function endThinkingPhase() {
+      clearInterval(statusTimer);
+      thinkingEl.classList.remove("live");
+      if (reasoning) {
+        if (tThinkEnd === null) tThinkEnd = performance.now();
+        thinkingSummary.textContent = thoughtLabel({ reasoning: reasoning, timing: { think: tThinkEnd - tThinkStart } });
+      } else {
+        thinkingEl.remove();
+      }
+    }
+
+    function resetIdle() {
+      if (idleTimer) clearTimeout(idleTimer);
+      idleTimer = setTimeout(function () {
+        stalled = true;
+        abortRef.abort();
+      }, idleMs);
+    }
 
     // Full markdown + KaTeX on every token is too heavy for long replies,
     // so during streaming re-render at most every 100 ms.
@@ -3302,24 +3480,45 @@
       if (renderTimer) return;
       renderTimer = setTimeout(function () {
         renderTimer = null;
-        assistantEl.innerHTML = renderMarkdown(fullText);
-        decorateCodeBlocks(assistantEl);
+        if (fullText) {
+          bodyEl.innerHTML = renderMarkdown(fullText);
+          decorateCodeBlocks(bodyEl);
+        }
+        if (thinkingBody.textContent.length !== reasoning.length) thinkingBody.textContent = reasoning;
+        updateStatus();
         scrollToBottom(false);
       }, 100);
     }
 
     function timing() {
       if (tFirst === null) return null;
-      return { wait: Math.round(tFirst - tStart), gen: Math.round(tLast - tFirst) };
+      var t = { wait: Math.round(tFirst - tStart), gen: Math.round(tLast - tFirst) };
+      if (tThinkStart !== null) t.think = Math.round((tThinkEnd !== null ? tThinkEnd : tLast) - tThinkStart);
+      return t;
     }
 
-    function finish(entry) {
-      entry.timing = timing();
+    function entry(extra) {
+      var e = { role: "assistant", content: fullText, model: servedModel || model, requested: model, provider: servedProvider, usage: usage };
+      if (reasoning) e.reasoning = reasoning;
+      Object.keys(extra || {}).forEach(function (k) { e[k] = extra[k]; });
+      return e;
+    }
+
+    function finish(e) {
+      e.timing = timing();
       if (renderTimer) { clearTimeout(renderTimer); renderTimer = null; }
-      fileReply(entry, sendChatId, assistantEl);
+      fileReply(e, sendChatId, assistantEl);
+    }
+
+    // Something came back, then the stream broke. Keep what arrived rather
+    // than throwing it away, and offer Retry in place of it.
+    function keepPartial(why) {
+      finish(entry({ interrupted: why }));
+      if (currentChatId === sendChatId) showError("The reply was cut off (" + why + "). What arrived is kept above; Retry replaces it.", true);
     }
 
     try {
+      resetIdle();
       var res = await fetch(OPENROUTER + "/chat/completions", {
         method: "POST",
         headers: {
@@ -3335,7 +3534,7 @@
           // Groups this chat's requests in OpenRouter's logs and Broadcast traces.
           session_id: sendChatId
         }),
-        signal: currentAbort.signal
+        signal: abortRef.signal
       });
 
       if (!res.ok || !res.body) {
@@ -3350,6 +3549,7 @@
       while (true) {
         var chunk = await reader.read();
         if (chunk.done) break;
+        resetIdle();
         buffer += decoder.decode(chunk.value, { stream: true });
 
         var lines = buffer.split("\n");
@@ -3370,36 +3570,63 @@
             throw new Error(json.error.message || "Model returned an error");
           }
           var choice = json.choices && json.choices[0];
-          var piece = choice && choice.delta && choice.delta.content;
-          if (piece) {
+          var delta = choice && choice.delta;
+          var thought = reasoningPiece(delta);
+          var piece = delta && delta.content;
+          if (thought || piece) {
             tLast = performance.now();
             if (tFirst === null) tFirst = tLast;
+          }
+          if (thought && !fullText) {
+            if (tThinkStart === null) tThinkStart = tLast;
+            reasoning += thought;
+            queueRender();
+          }
+          if (piece) {
+            if (!fullText) {
+              if (tThinkStart !== null) tThinkEnd = tLast;
+              endThinkingPhase();
+            }
             fullText += piece;
             queueRender();
           }
+          if (choice && choice.finish_reason) finishReason = choice.finish_reason;
           if (json.usage) usage = json.usage;
           if (typeof json.model === "string" && json.model) servedModel = json.model;
           if (typeof json.provider === "string" && json.provider) servedProvider = json.provider;
         }
       }
 
-      if (!fullText) throw new Error("The model returned an empty response");
-      finish({ role: "assistant", content: fullText, model: servedModel || model, requested: model, provider: servedProvider, usage: usage });
+      if (!fullText && !reasoning) throw new Error("The model returned an empty response");
+      if (finishReason === "length") {
+        keepPartial(fullText ? "hit the output token limit" : "hit the output token limit while still thinking");
+      } else if (!fullText) {
+        keepPartial("the model stopped after thinking, without writing a reply");
+      } else {
+        finish(entry());
+      }
     } catch (err) {
-      if (err.name === "AbortError") {
-        if (fullText) {
-          finish({ role: "assistant", content: fullText, model: servedModel || model, requested: model, provider: servedProvider, usage: usage, stopped: true });
+      var got = fullText || reasoning;
+      if (err.name === "AbortError" && !stalled) {
+        if (got) {
+          finish(entry({ stopped: true }));
         } else if (currentChatId === sendChatId) {
           assistantEl.remove();
           showError("Stopped before any reply arrived.", true);
         }
+      } else if (got) {
+        keepPartial(stalled ? "the connection went silent for " + formatSeconds(idleMs) : err.message);
       } else if (currentChatId === sendChatId) {
         assistantEl.remove();
-        showError("Request failed: " + err.message, true);
+        showError(stalled ? "No response for " + formatSeconds(idleMs) + "; the connection seems to have dropped." : "Request failed: " + err.message, true);
       }
     } finally {
+      clearInterval(statusTimer);
+      if (idleTimer) clearTimeout(idleTimer);
+      if (renderTimer) { clearTimeout(renderTimer); renderTimer = null; }
       currentAbort = null;
       setStreamingUI(false);
+      releaseWakeLock();
       scrollToBottom(false);
     }
   }
