@@ -1,8 +1,9 @@
 # Tests
 
 One end-to-end suite, `e2e.mjs`, drives the real app in headless Chromium.
-OpenRouter and Artificial Analysis are replaced by in-page mocks, so it needs
-no API keys and no network access beyond the local server.
+OpenRouter, Artificial Analysis and Skapi (accounts and sync) are replaced by
+in-page mocks, so it needs no API keys, no accounts and no network access
+beyond the local server.
 
 ## Run
 
@@ -29,3 +30,7 @@ Environment variables:
 The run prints a table of named checks and exits non-zero if any fail. Add a
 check for every behaviour change; the mocks at the top of the file show the
 shapes of the OpenRouter and Artificial Analysis responses the app expects.
+
+The sync checks imitate several devices by swapping the app's `orc_*` keys in
+`localStorage` (`takeDevice` / `putDevice`) while the fake Skapi "server"
+keeps its records under `__skapi_db`.

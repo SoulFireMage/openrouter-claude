@@ -40,8 +40,9 @@ Features, roughly in the order they were built:
 
 ## State of `main`
 
-- Service worker cache: `orc-shell-v22`. Bump it on every shell change.
-- Tests: `tests/e2e.mjs`, about 200 named checks, all passing at handoff.
+- Service worker cache: `orc-shell-v23`. Bump it on every shell change.
+- Tests: `tests/e2e.mjs`, about 275 named checks, all passing in November
+  2026 after the account, sync and resilience work (see below).
   Run as described in `tests/README.md` (serve the repo on port 8765; the
   suite mocks OpenRouter and Artificial Analysis in the page).
 - Scheduled workflow `.github/workflows/aa-scores.yml` runs daily and needs
@@ -83,6 +84,20 @@ Features, roughly in the order they were built:
   warns, and exports now include the open chat's unsaved messages.
 - Ideas parked in README "Ideas for later": streamed image previews, images
   in exports, attaching your own photos, chat rename, Markdown export.
+
+## Added November 2026
+
+- Optional Skapi accounts with local-first chat sync (design notes in
+  `CLAUDE.md` and at the top of the "Account and sync" block in
+  `index.html`). Verified against the real Skapi project with a throwaway
+  account, as well as by the mocked suite.
+- Dropped connections: automatic reconnect when nothing had arrived, partial
+  replies kept as "interrupted" with Regenerate.
+- Share this chat now shares readable text and falls back to the clipboard.
+  The "Permission denied" was Android refusing a shared `.json` file. This
+  and the text-selection CSS could not be tried on a real phone from the
+  sandbox: the owner's phone is the test.
+- Not synced: profiles, system prompt, images.
 
 ## Next: multi-agent chat mode
 

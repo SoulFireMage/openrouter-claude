@@ -13,6 +13,9 @@ phone, so every change ships as a PR that is merged to `main`, which deploys.
   change to a shell file**, or installed copies keep the old version.
 - `vendor/` holds marked, DOMPurify and KaTeX (fonts as woff2), vendored so
   nothing loads from a CDN. The service worker's file list must match it.
+- `vendor/skapi.js` is the Skapi SDK (`skapi-js` from npm, `dist/skapi.js`,
+  unmodified). It is injected by `loadSkapi()` only when someone signs in or
+  was signed in, so signed-out use never loads it.
 - The OpenRouter key is typed into settings and lives only in `localStorage`.
   The repo is public: never commit a key, never put one in code, tests or
   commit messages.
@@ -29,6 +32,16 @@ phone, so every change ships as a PR that is merged to `main`, which deploys.
   messages hold only `images: [{ id, type }]` references, because
   localStorage is far too small for image data.
 
+- Accounts and sync are optional and local-first ("Account and sync" block
+  in `index.html`). `localStorage` stays the source of truth on a device;
+  sync only merges. Accounts live in the owner's shared Skapi project
+  (project id in `SKAPI_PROJECT_ID`, public by design, same one as
+  `rhetoric-salle`). Each chat is one record in the private table
+  `orc_chats` with unique id `orc:<user id>:<chat id>`; a deleted chat
+  becomes a `{ deleted: true }` record. Sync pulls, merges, then pushes.
+  The merge rules are listed at the top of that block: keep them
+  loss-free. The key, profiles and images are never uploaded.
+
 ## Things that bite
 
 - Inside the IIFE, `history` is the current chat's message array. Use
@@ -39,6 +52,22 @@ phone, so every change ships as a PR that is merged to `main`, which deploys.
   DOMPurify; raw HTML from the model is escaped to text. Keep it that way.
 - Chat history entries are only `user` and `assistant`. Errors are transient
   UI and must never be stored or sent to the API.
+- Android's share sheet refuses `application/json` files with "Permission
+  denied" even when `canShare()` says yes. Shared files go out as
+  `text/plain` `.txt`; a single chat is shared as text.
+- A backgrounded phone kills the streaming connection. `sendMessage`
+  reconnects only when no text had arrived, and otherwise keeps the partial
+  reply marked `interrupted`. Don't auto-retry anything that may already
+  have been billed in full (images).
+- The Skapi SDK keeps its session in `localStorage` under
+  `CognitoIdentityServiceProvider.*` keys. Never clear `localStorage`
+  wholesale.
+- Skapi facts checked against the live service: listing a private table
+  returns only the caller's records; `record_id` accepts a unique id;
+  creating a taken unique id fails with "already taken"; updating a missing
+  record fails with "User has no access to update this record"; record data
+  over 32 KB is stored as a file transparently; `$updated` works as an index
+  on private tables. The fake in `tests/e2e.mjs` copies these.
 - Artificial Analysis ids do not map to OpenRouter ids. Models are joined by
   creator alias plus name tokens (`joinAA` and helpers). Keep matching
   conservative: a wrong intelligence score is worse than a missing one.
@@ -48,7 +77,9 @@ phone, so every change ships as a PR that is merged to `main`, which deploys.
 `orc_api_key`, `orc_model`, `orc_system_prompt`, `orc_filters`,
 `orc_chats` (index) and `orc_chat_<id>` (messages), `orc_current_chat`,
 `orc_profiles`, `orc_active_profile`, `orc_image_models` (cached image
-catalogue), `orc_image_opts` (per-model image options). Legacy keys cleaned up on load:
+catalogue), `orc_image_opts` (per-model image options), `orc_cloud_user`
+(`{ id, email, expired? }` while signed in) and `orc_cloud_state` (sync
+bookkeeping: cursor, per-chat synced stamps, pending deletes). Legacy keys cleaned up on load:
 `orc_history` (migrated into a chat) and `orc_aa_key`, `orc_aa_cache`,
 `orc_aa_attempt` (from the abandoned per-device Artificial Analysis key).
 
@@ -58,7 +89,11 @@ catalogue), `orc_image_opts` (per-model image options). Legacy keys cleaned up o
 Analysis inside the page. Serve the repo on port 8765 and run it; see
 `tests/README.md`. Add checks for every behaviour change and keep it green.
 The cloud sandbox cannot reach openrouter.ai or artificialanalysis.ai, so
-the mocks are the only verification available there. The scores Action can
+the mocks are the only verification available there. Skapi is replaced by
+an in-page fake (`fakeSkapi`), enabled per check with the `__skapiFake`
+flag; `docs.skapi.com` and the Skapi API were reachable from the sandbox in
+November 2026, so SDK behaviour can be probed for real with a throwaway
+account when it matters. The scores Action can
 be triggered and its logs read through the GitHub tools; it logs the
 response's field names (never the key) to make shape changes easy to spot.
 

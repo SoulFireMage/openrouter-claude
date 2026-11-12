@@ -9,7 +9,7 @@ const fakeFetch = () => {
   window.__requests = [];
   window.__scenarios = [];
   const realFetch = window.fetch.bind(window);
-  const sse = (events, delayMs = 0, signal) => new ReadableStream({
+  const sse = (events, delayMs = 0, signal, failAtEnd) => new ReadableStream({
     async start(ctrl) {
       const enc = new TextEncoder();
       let aborted = false;
@@ -20,6 +20,9 @@ const fakeFetch = () => {
         ctrl.enqueue(enc.encode(typeof e === "string" ? e : "data: " + JSON.stringify(e) + "\n\n"));
       }
       if (aborted) return;
+      // A connection that dies part-way, as when a phone backgrounds the app.
+      // (Erroring at once would discard the chunks still queued, so wait for them to be read.)
+      if (failAtEnd) { await new Promise(r => setTimeout(r, 80)); ctrl.error(new TypeError("network error")); return; }
       ctrl.enqueue(enc.encode("data: [DONE]\n\n"));
       ctrl.close();
     }
@@ -119,6 +122,7 @@ const fakeFetch = () => {
       const body = JSON.parse(opts.body);
       window.__imgRequests.push(body);
       if (mode === "fail") return json({ error: { message: "Generation failed", code: 502 } }, 502);
+      if (mode === "drop") throw new TypeError("Failed to fetch");
       if (mode === "slow") {
         await new Promise((resolve, reject) => {
           const t = setTimeout(resolve, 4000);
@@ -164,6 +168,14 @@ const fakeFetch = () => {
     }
     window.__requests.push(JSON.parse(opts.body));
     const sc = window.__scenarios.shift() || { kind: "ok", text: "default" };
+    // "drop": the request never connects. "hang": it connects to nothing and
+    // stays silent until aborted. "drop-mid": it dies after some text.
+    if (sc.kind === "drop") throw new TypeError("Failed to fetch");
+    if (sc.kind === "hang") {
+      return new Promise((resolve, reject) => {
+        opts.signal.addEventListener("abort", () => reject(new DOMException("The user aborted a request.", "AbortError")));
+      });
+    }
     if (sc.kind === "http") {
       return new Response(JSON.stringify({ error: { message: sc.message, code: sc.status } }), { status: sc.status });
     }
@@ -171,9 +183,117 @@ const fakeFetch = () => {
     const served = sc.servedModel || JSON.parse(opts.body).model;
     const events = words.map(w => ({ model: served, provider: "MockProvider", choices: [{ delta: { content: w } }] }));
     if (sc.kind === "midstream-error") events.push({ error: { message: sc.message } });
-    else events.push({ choices: [{ delta: {}, finish_reason: "stop" }], usage: { prompt_tokens: 12, completion_tokens: words.length, cost: 0.00042 } });
-    const body = sse(events, sc.delayMs || 0, opts.signal);
+    else if (sc.kind !== "drop-mid") events.push({ choices: [{ delta: {}, finish_reason: "stop" }], usage: { prompt_tokens: 12, completion_tokens: words.length, cost: 0.00042 } });
+    const body = sse(events, sc.delayMs || 0, opts.signal, sc.kind === "drop-mid");
     return new Response(body, { status: 200, headers: { "Content-Type": "text/event-stream" } });
+  };
+};
+
+// A stand-in for the Skapi SDK (vendor/skapi.js), installed only while the
+// "__skapiFake" flag is set so that signed-out checks can prove the real one
+// is never loaded. Its "server" lives in localStorage under "__skapi_db",
+// which survives the device swaps the sync checks do. Error codes, messages
+// and response shapes copy what the real service returned when probed.
+const fakeSkapi = () => {
+  if (!localStorage.getItem("__skapiFake")) return;
+  const load = () => JSON.parse(localStorage.getItem("__skapi_db") || '{"users":{},"session":null,"records":[],"clock":0}');
+  const save = (db) => localStorage.setItem("__skapi_db", JSON.stringify(db));
+  const err = (code, message) => Object.assign(new Error(message), { code });
+  const clone = (o) => JSON.parse(JSON.stringify(o));
+  const tick = (db) => { db.clock = Math.max(Date.now(), (db.clock || 0) + 1); return db.clock; };
+  window.__skapiCalls = [];
+  window.Skapi = class {
+    constructor(id) { window.__skapiProject = id; this.more = {}; }
+    async net(name) {
+      window.__skapiCalls.push(name);
+      await new Promise(r => setTimeout(r, 5));
+      if (localStorage.getItem("__skapiDown")) throw new TypeError("Failed to fetch");
+    }
+    me(db) {
+      const u = db.session && db.users[db.session];
+      if (!u) throw err("INVALID_REQUEST", "User needs to login.");
+      return u;
+    }
+    async getProfile() {
+      await this.net("getProfile");
+      const db = load();
+      const u = db.session && db.users[db.session];
+      return u ? { user_id: u.id, email: u.email, access_group: 1 } : null;
+    }
+    async login({ email, password }) {
+      await this.net("login");
+      const db = load();
+      const u = db.users[email];
+      if (!u || u.password !== password) throw err("INCORRECT_USERNAME_OR_PASSWORD", "Incorrect username or password.");
+      db.session = email; save(db);
+      return { user_id: u.id, email: u.email, access_group: 1 };
+    }
+    async signup({ email, password }, opts = {}) {
+      await this.net("signup");
+      const db = load();
+      if (db.users[email]) throw err("EXISTS", "The account already exists.");
+      const u = db.users[email] = { id: "user-" + (Object.keys(db.users).length + 1), email, password };
+      if (opts.login) db.session = email;
+      save(db);
+      return opts.login ? { user_id: u.id, email, access_group: 1 } : "SUCCESS: The account has been created.";
+    }
+    async logout() { await this.net("logout"); const db = load(); db.session = null; save(db); return "SUCCESS: The user has been logged out."; }
+    async forgotPassword({ email }) {
+      await this.net("forgotPassword");
+      const db = load();
+      if (!db.users[email]) throw err("NOT_EXISTS", "Username/client id combination not found.");
+      db.users[email].code = "246810"; save(db);
+      return "SUCCESS: Verification code has been sent.";
+    }
+    async resetPassword({ email, code, new_password }) {
+      await this.net("resetPassword");
+      const db = load();
+      const u = db.users[email];
+      if (!u || String(code) !== u.code) throw err("INVALID_PARAMETER", "Invalid verification code provided, please try again.");
+      u.password = new_password; delete u.code; save(db);
+      return "SUCCESS: New password has been set.";
+    }
+    async postRecord(data, cfg) {
+      await this.net("postRecord");
+      const db = load();
+      const me = this.me(db);
+      if (cfg.record_id) {
+        const r = db.records.find(r => r.record_id === cfg.record_id || r.unique_id === cfg.record_id);
+        if (!r || r.user_id !== me.id) throw err("INVALID_REQUEST", "User has no access to update this record.");
+        r.data = clone(data); r.updated = tick(db); save(db);
+        return clone(r);
+      }
+      if (cfg.unique_id && db.records.some(r => r.unique_id === cfg.unique_id)) throw err("INVALID_REQUEST", 'Unique ID "' + cfg.unique_id + '" is already taken.');
+      const r = { record_id: "rec" + (db.records.length + 1), unique_id: cfg.unique_id, user_id: me.id, table: clone(cfg.table), data: clone(data), updated: tick(db) };
+      r.uploaded = r.updated;
+      db.records.push(r); save(db);
+      return clone(r);
+    }
+    async getRecords(q, o = {}) {
+      await this.net("getRecords");
+      const db = load();
+      const me = this.me(db);
+      if (q.unique_id) {
+        const r = db.records.find(r => r.unique_id === q.unique_id && r.user_id === me.id);
+        if (!r) throw err("NOT_EXISTS", "Unique ID does not exists.");
+        return { list: [clone(r)], endOfList: true, startKey: "end" };
+      }
+      let list = db.records.filter(r => r.user_id === me.id && r.table.name === q.table.name && r.table.access_group === q.table.access_group);
+      if (q.index) {
+        if (q.index.name !== "$updated" || q.index.condition !== ">") throw err("INVALID_PARAMETER", "fake: unsupported index query");
+        list = list.filter(r => r.updated > q.index.value);
+      }
+      // Index lag: a record written a moment ago is not listed yet.
+      const hide = localStorage.getItem("__skapiLag");
+      if (hide) list = list.filter(r => r.data.id !== hide);
+      list.sort((a, b) => a.updated - b.updated);
+      const key = JSON.stringify(q);
+      const limit = Number(localStorage.getItem("__skapiPage")) || o.limit || 50;
+      const start = o.fetchMore ? (this.more[key] || 0) : 0;
+      const page = list.slice(start, start + limit);
+      this.more[key] = start + page.length;
+      return { list: clone(page), endOfList: start + page.length >= list.length };
+    }
   };
 };
 
@@ -182,6 +302,7 @@ const browser = await chromium.launch(process.env.CHROMIUM_PATH ? { executablePa
 const ctx = await browser.newContext({ viewport: { width: 390, height: 780 } });
 await ctx.grantPermissions(["clipboard-read", "clipboard-write"], { origin: BASE });
 await ctx.addInitScript(fakeFetch);
+await ctx.addInitScript(fakeSkapi);
 const page = await ctx.newPage();
 const errors = [];
 page.on("pageerror", e => errors.push("pageerror: " + e.message));
@@ -1013,10 +1134,14 @@ await page.click("#save-settings");
 await page.click("#open-chats");
 await page.click('.chat-row:has(.chat-title:text-is("Bulk chat 5")) .chat-open');
 await page.evaluate(() => {
-  window.__sharedJson = [];
+  window.__sharedData = [];
+  window.__shareError = null;
   Object.defineProperty(navigator, "canShare", { configurable: true, value: () => true });
   Object.defineProperty(navigator, "share", { configurable: true, value: async (d) => {
-    for (const f of d.files) window.__sharedJson.push([f.name, f.type, await f.text()]);
+    const files = [];
+    for (const f of d.files || []) files.push([f.name, f.type, await f.text()]);
+    window.__sharedData.push({ title: d.title, text: d.text, files });
+    if (window.__shareError) throw window.__shareError;
   } });
 });
 await page.click("#open-settings");
@@ -1029,10 +1154,88 @@ check("export: this-chat file holds just that chat, no profiles", chatFile.forma
   JSON.stringify(chatFile.chats[0].messages) === JSON.stringify([{ role: "user", content: "question 5" }, { role: "assistant", content: "answer 5" }]) &&
   Array.isArray(chatFile.profiles) && chatFile.profiles.length === 0 && !chatFileText.includes("sk-or-v1"), chatFileText.slice(0, 200));
 check("export: status confirms the export", (await page.textContent("#chat-export-status")) === "Exported “Bulk chat 5” (2 messages).", await page.textContent("#chat-export-status"));
+// Sharing one chat. Android refuses a shared .json file with "Permission
+// denied", so the chat goes out as readable text, and anything the share
+// sheet won't take lands on the clipboard instead.
+const expectedShare = "# Bulk chat 5\n\n## You\n\nquestion 5\n\n## Assistant\n\nanswer 5\n";
 await page.click("#share-chat");
-await page.waitForFunction(() => window.__sharedJson.length === 1);
-const sharedChat = await page.evaluate(() => window.__sharedJson[0]);
-check("export: share hands over the same single-chat file", sharedChat[0] === dlChat.suggestedFilename() && sharedChat[1] === "application/json" && JSON.parse(sharedChat[2]).chats[0].id === "bulk5", JSON.stringify(sharedChat).slice(0, 160));
+await page.waitForFunction(() => window.__sharedData.length === 1);
+const sharedChat = await page.evaluate(() => window.__sharedData[0]);
+check("share: one chat is shared as readable text, not a json file", sharedChat.title === "Bulk chat 5" && sharedChat.text === expectedShare && sharedChat.files.length === 0, JSON.stringify(sharedChat).slice(0, 200));
+check("share: status confirms", (await page.textContent("#chat-export-status")) === "Shared.", await page.textContent("#chat-export-status"));
+await page.evaluate(() => { window.__shareError = new DOMException("Permission denied", "NotAllowedError"); navigator.clipboard.writeText("stale"); });
+await page.click("#share-chat");
+await page.waitForFunction(() => /copied to the clipboard/.test(document.getElementById("chat-export-status").textContent));
+check("share: a refused share falls back to the clipboard", (await page.evaluate(() => navigator.clipboard.readText())) === expectedShare, await page.evaluate(() => navigator.clipboard.readText()));
+check("share: the fallback is explained, not shown as an error", !(await page.$eval("#chat-export-status", e => e.classList.contains("error"))) && !(await page.textContent("#chat-export-status")).includes("Permission denied"), await page.textContent("#chat-export-status"));
+await page.evaluate(() => { window.__shareError = new DOMException("cancelled", "AbortError"); navigator.clipboard.writeText("untouched"); document.getElementById("chat-export-status").textContent = ""; });
+await page.click("#share-chat");
+await page.waitForFunction(() => window.__sharedData.length === 3);
+await page.waitForTimeout(150);
+check("share: dismissing the share sheet copies nothing", (await page.evaluate(() => navigator.clipboard.readText())) === "untouched" && (await page.textContent("#chat-export-status")) === "");
+await page.evaluate(() => { Object.defineProperty(navigator, "share", { configurable: true, value: undefined }); navigator.clipboard.writeText("stale"); });
+check("share: the button is offered even without a share sheet", !(await page.$eval("#share-chat", b => b.hidden || b.disabled)));
+await page.click("#share-chat");
+await page.waitForFunction(() => /copied to the clipboard/.test(document.getElementById("chat-export-status").textContent));
+check("share: with no share sheet the chat is copied", (await page.evaluate(() => navigator.clipboard.readText())) === expectedShare);
+// A very long chat goes as a .txt file, which Android's share sheet accepts.
+await page.evaluate(() => {
+  window.__shareError = null;
+  Object.defineProperty(navigator, "share", { configurable: true, value: async (d) => {
+    const files = [];
+    for (const f of d.files || []) files.push([f.name, f.type, (await f.text()).length]);
+    window.__sharedData.push({ title: d.title, text: d.text, files });
+    if (window.__shareError) throw window.__shareError;
+  } });
+  const big = [{ role: "user", content: "long one" }, { role: "assistant", content: "x".repeat(120000) }];
+  localStorage.setItem("orc_chat_bulk5", JSON.stringify(big));
+});
+await page.reload({ waitUntil: "load" });
+await page.evaluate(() => {
+  window.__sharedData = [];
+  window.__shareError = null;
+  Object.defineProperty(navigator, "canShare", { configurable: true, value: () => true });
+  Object.defineProperty(navigator, "share", { configurable: true, value: async (d) => {
+    const files = [];
+    for (const f of d.files || []) files.push([f.name, f.type, (await f.text()).length]);
+    window.__sharedData.push({ title: d.title, text: d.text, files });
+    if (window.__shareError) throw window.__shareError;
+  } });
+});
+await page.click("#open-settings");
+await page.click("#share-chat");
+await page.waitForFunction(() => window.__sharedData.length === 1);
+const sharedBig = await page.evaluate(() => window.__sharedData[0]);
+check("share: a very long chat goes as a plain-text file", sharedBig.text === undefined && sharedBig.files.length === 1 && /^openrouter-chat-bulk-chat-5-\d{4}-\d{2}-\d{2}\.txt$/.test(sharedBig.files[0][0]) && sharedBig.files[0][1] === "text/plain" && sharedBig.files[0][2] > 120000, JSON.stringify(sharedBig));
+await page.evaluate((v) => localStorage.setItem("orc_chat_bulk5", v), JSON.stringify([{ role: "user", content: "question 5" }, { role: "assistant", content: "answer 5" }]));
+await page.reload({ waitUntil: "load" });
+// Sharing everything: the export goes as text/plain too, and a refusal downloads it.
+await page.evaluate(() => {
+  window.__sharedData = [];
+  window.__shareError = null;
+  Object.defineProperty(navigator, "canShare", { configurable: true, value: () => true });
+  Object.defineProperty(navigator, "share", { configurable: true, value: async (d) => {
+    const files = [];
+    for (const f of d.files || []) files.push([f.name, f.type, await f.text()]);
+    window.__sharedData.push({ title: d.title, text: d.text, files });
+    if (window.__shareError) throw window.__shareError;
+  } });
+});
+await page.click("#open-chats");
+await page.evaluate(() => { document.getElementById("share-btn").hidden = false; });
+await page.click("#share-btn");
+await page.waitForFunction(() => window.__sharedData.length === 1);
+const sharedAll = await page.evaluate(() => window.__sharedData[0]);
+check("share: the full export is shared as a text file Android accepts", sharedAll.files.length === 1 && /^openrouter-chat-export-\d{4}-\d{2}-\d{2}\.txt$/.test(sharedAll.files[0][0]) && sharedAll.files[0][1] === "text/plain" && JSON.parse(sharedAll.files[0][2]).format === "openrouter-chat", JSON.stringify(sharedAll).slice(0, 200));
+await page.evaluate(() => { window.__shareError = new DOMException("Permission denied", "NotAllowedError"); });
+const [dlRefused] = await Promise.all([page.waitForEvent("download"), page.click("#share-btn")]);
+check("share: a refused full export is downloaded instead", /\.json$/.test(dlRefused.suggestedFilename()) && (await page.textContent("#transfer-status")).includes("downloaded instead"), await page.textContent("#transfer-status"));
+await page.setInputFiles("#import-file", { name: "shared.txt", mimeType: "text/plain", buffer: Buffer.from(sharedAll.files[0][2]) });
+await page.waitForFunction(() => /^Imported/.test(document.getElementById("transfer-status").textContent));
+check("share: a shared .txt export imports", /^Imported 0 chats, \d+ already here/.test(await page.textContent("#transfer-status")), await page.textContent("#transfer-status"));
+check("share: the import picker accepts .txt", (await page.$eval("#import-file", e => e.accept)).includes(".txt"));
+await page.click("#chats-overlay", { position: { x: 380, y: 400 } });
+await page.click("#open-settings");
 await page.click("#save-settings");
 await page.click("#open-chats");
 await page.setInputFiles("#import-file", { name: "one.json", mimeType: "application/json", buffer: Buffer.from(chatFileText) });
@@ -1080,6 +1283,407 @@ const openInAll = allFullFile.chats.find(c => c.id === fullChatId);
 check("export: full export includes the open chat's unsaved messages", openInAll && openInAll.messages.length === 4, JSON.stringify(openInAll && openInAll.messages.length));
 await page.evaluate(() => { Storage.prototype.setItem = window.__realSetItem; });
 await page.click("#chats-overlay", { position: { x: 380, y: 400 } });
+
+
+// ---------- Dropped connections (backgrounded tab, flaky mobile network) ----------
+const baseDevice = { orc_api_key: "sk-or-v1-test", orc_model: "anthropic/claude-sonnet-4" };
+const takeDevice = () => page.evaluate(() => Object.fromEntries(Object.keys(localStorage).filter(k => k.startsWith("orc_")).map(k => [k, localStorage.getItem(k)])));
+const putDevice = async (device) => {
+  await page.evaluate((d) => {
+    Object.keys(localStorage).filter(k => k.startsWith("orc_")).forEach(k => localStorage.removeItem(k));
+    for (const [k, v] of Object.entries(d)) localStorage.setItem(k, v);
+  }, device);
+  await page.reload({ waitUntil: "load" });
+};
+const setHidden = (hidden) => page.evaluate((h) => {
+  Object.defineProperty(document, "visibilityState", { configurable: true, get: () => (h ? "hidden" : "visible") });
+  document.dispatchEvent(new Event("visibilitychange"));
+}, hidden);
+const send = async (text) => { await page.fill("#composer", text); await page.click("#send-btn"); };
+const idle = () => page.waitForFunction(() => !document.querySelector("#send-btn").classList.contains("stop"));
+
+await page.evaluate(() => localStorage.clear());
+await putDevice(baseDevice);
+check("anon: the account library is never loaded while signed out", await page.evaluate(() => typeof window.Skapi === "undefined" && !document.querySelector('script[src*="skapi"]')));
+
+// Dropped before any text: reconnects by itself, one clean reply.
+await page.evaluate(() => { window.__requests = []; window.__scenarios.push({ kind: "drop" }, { kind: "ok", text: "recovered reply" }); });
+await send("first drop");
+await idle();
+check("drop: reconnects by itself when nothing had arrived", (await page.$$(".msg.error")).length === 0 && (await page.textContent(".msg.assistant")).includes("recovered reply") && (await page.evaluate(() => window.__requests.length)) === 2, await page.textContent("#messages"));
+check("drop: the retried turn is stored once", JSON.stringify((await curChat()).map(m => m.role)) === JSON.stringify(["user", "assistant"]) && !(await curChat())[1].interrupted, JSON.stringify(await curChat()));
+
+// Dropped while in the background: waits for the foreground, then reconnects.
+await setHidden(true);
+await page.evaluate(() => { window.__requests = []; window.__scenarios.push({ kind: "drop" }, { kind: "ok", text: "after returning" }); });
+await send("backgrounded");
+await page.waitForFunction(() => /Reconnecting/.test((document.querySelector(".msg.assistant.generating") || {}).textContent || ""));
+await page.waitForTimeout(1300);
+check("drop: no reconnect attempt while the app is in the background", (await page.evaluate(() => window.__requests.length)) === 1 && await page.$eval("#send-btn", b => b.classList.contains("stop")));
+await setHidden(false);
+await idle();
+check("drop: reconnects on returning to the foreground", (await page.evaluate(() => window.__requests.length)) === 2 && (await page.$$(".msg.error")).length === 0 && (await page.textContent("#messages")).includes("after returning") && !(await page.textContent("#messages")).includes("Reconnecting"), await page.textContent("#messages"));
+
+// Stop while waiting to reconnect.
+await setHidden(true);
+await page.evaluate(() => { window.__requests = []; window.__scenarios.push({ kind: "drop" }); });
+await send("stop me");
+await page.waitForFunction(() => /Reconnecting/.test((document.querySelector(".msg.assistant.generating") || {}).textContent || ""));
+await page.click("#send-btn");
+await idle();
+check("drop: Stop works while waiting to reconnect", (await page.textContent(".msg.error")).includes("Stopped before any reply arrived.") && (await page.evaluate(() => window.__requests.length)) === 1 && (await page.$$(".msg.assistant.generating")).length === 0, await page.textContent("#messages"));
+await setHidden(false);
+
+// It gives up after a few attempts, and the message is still there to retry.
+await page.evaluate(() => { window.__requests = []; window.__scenarios.push({ kind: "drop" }, { kind: "drop" }, { kind: "drop" }, { kind: "ok", text: "finally" }); });
+await page.click(".retry-btn");
+await page.waitForSelector(".msg.error .retry-btn");
+check("drop: gives up after repeated drops and says why", (await page.textContent(".msg.error")).includes("couldn't be restored") && (await page.evaluate(() => window.__requests.length)) === 3, await page.textContent(".msg.error"));
+check("drop: the unanswered message is still saved", (await curChat()).pop().content === "stop me");
+await page.click(".retry-btn");
+await idle();
+check("drop: Retry still works afterwards", (await page.textContent("#messages")).includes("finally") && (await page.$$(".msg.error")).length === 0);
+
+// Dropped part-way: the text that arrived is kept, never thrown away.
+await page.evaluate(() => { window.__requests = []; window.__scenarios.push({ kind: "drop-mid", text: "half an answer and " }); });
+await send("cut me off");
+await page.waitForSelector(".msg.error .retry-btn");
+await idle();
+let cut = await curChat();
+check("drop: a partial reply is kept and marked interrupted", cut[cut.length - 1].role === "assistant" && cut[cut.length - 1].content === "half an answer and " && cut[cut.length - 1].interrupted === true, JSON.stringify(cut[cut.length - 1]));
+check("drop: no second request is made once text has arrived", (await page.evaluate(() => window.__requests.length)) === 1);
+check("drop: the footer and notice say what happened", (await page.$$eval(".msg.assistant .meta", els => els.pop().textContent)).includes("interrupted") && (await page.textContent(".msg.error")).includes("The part that arrived was kept") && (await page.textContent(".msg.error .retry-btn")) === "Regenerate", await page.textContent(".msg.error"));
+await page.reload({ waitUntil: "load" });
+check("drop: the offer to regenerate survives a reload", (await page.$$(".msg.error .retry-btn")).length === 1 && (await page.textContent(".msg.error .retry-btn")) === "Regenerate");
+const beforeRegen = (await curChat()).length;
+await page.evaluate(() => { window.__requests = []; window.__scenarios.push({ kind: "ok", text: "the whole answer" }); });
+await page.click(".msg.error .retry-btn");
+await page.waitForFunction(() => document.querySelector("#messages").textContent.includes("the whole answer"));
+await idle();
+cut = await curChat();
+check("drop: Regenerate replaces the partial reply", cut.length === beforeRegen && cut[cut.length - 1].content === "the whole answer" && !cut[cut.length - 1].interrupted && !(await page.textContent("#messages")).includes("half an answer"), JSON.stringify(cut.slice(-2)));
+check("drop: Regenerate does not send the partial reply back", !JSON.stringify(await page.evaluate(() => window.__requests[0].messages)).includes("half an answer"));
+
+// A dropped image request is not retried (it may have been billed), but is explained.
+await page.evaluate(() => { localStorage.setItem("__imgMode", "on"); localStorage.setItem("orc_model", "acme/pixel-1"); });
+await page.reload({ waitUntil: "load" });
+await page.waitForFunction(() => document.getElementById("composer").placeholder === "Describe an image…");
+await page.evaluate(() => { localStorage.setItem("__imgMode", "drop"); window.__imgRequests = []; });
+await send("a picture");
+await page.waitForSelector(".msg.error .retry-btn");
+check("drop: a dropped image request is explained and not retried by itself", (await page.textContent(".msg.error")).includes("may still have been generated and billed") && (await page.evaluate(() => window.__imgRequests.length)) === 1, await page.textContent(".msg.error"));
+await page.evaluate(() => { localStorage.removeItem("__imgMode"); localStorage.removeItem("orc_image_models"); });
+
+// ---------- Text selection ----------
+await putDevice({ ...baseDevice, orc_chats: JSON.stringify([{ id: "sel1", title: "Selection", created: 1, updated: 1, model: "m/x", count: 2 }]), orc_current_chat: "sel1",
+  orc_chat_sel1: JSON.stringify([{ role: "user", content: "pick part of this" }, { role: "assistant", content: "Alpha beta gamma.\n\n```js\nlet x = 1;\n```", model: "m/x", usage: { prompt_tokens: 3, completion_tokens: 4 } }]) });
+const sel = await page.evaluate(() => {
+  const us = (q) => getComputedStyle(document.querySelector(q)).userSelect;
+  const msg = document.querySelector(".msg.assistant");
+  const s = window.getSelection();
+  s.selectAllChildren(msg);
+  const whole = s.toString();
+  s.removeAllRanges();
+  return { msg: us(".msg.assistant"), user: us(".msg.user"), actions: us(".msg-actions"), copy: us(".copy-btn"), head: us(".codeblock-head"), header: us("header"), whole };
+});
+check("select: message text is selectable, the controls around it are not", sel.msg === "text" && sel.user === "text" && sel.actions === "none" && sel.copy === "none" && sel.head === "none" && sel.header === "none", JSON.stringify(sel));
+check("select: selecting a whole bubble takes its text only", sel.whole.includes("Alpha beta gamma.") && sel.whole.includes("let x = 1;") && !sel.whole.includes("tokens") && !sel.whole.includes("Copy"), JSON.stringify(sel.whole));
+
+// ---------- Optional account and sync ----------
+const dev = (chatMap, extra = {}) => {
+  const d = { ...baseDevice, ...extra };
+  const index = [];
+  for (const [id, c] of Object.entries(chatMap)) {
+    index.push({ id, title: c.title || id, created: c.updated || 1000, updated: c.updated || 1000, model: "m/x", count: c.messages.length });
+    d["orc_chat_" + id] = JSON.stringify(c.messages);
+  }
+  d.orc_chats = JSON.stringify(index);
+  return d;
+};
+const qa = (...texts) => texts.map((t, i) => ({ role: i % 2 ? "assistant" : "user", content: t }));
+const remoteDb = () => page.evaluate(() => JSON.parse(localStorage.getItem("__skapi_db") || "null"));
+const remoteChats = async (userId) => Object.fromEntries((await remoteDb()).records.filter(r => r.user_id === userId).map(r => [r.data.id, r.data]));
+const localChats = () => page.evaluate(() => Object.fromEntries(JSON.parse(localStorage.getItem("orc_chats") || "[]").map(c => [c.id, { title: c.title, messages: JSON.parse(localStorage.getItem("orc_chat_" + c.id) || "[]") }])));
+const texts = (c) => c ? c.messages.map(m => m.content).join("|") : "(missing)";
+const cloudStatus = () => page.textContent("#cloud-status");
+const synced = () => page.waitForFunction(() => /^Synced at/.test(document.getElementById("cloud-status").textContent));
+const openSettings = async () => { if (!(await page.$eval("#settings-overlay", e => e.classList.contains("open")))) await page.click("#open-settings"); };
+const signIn = async (email, password, create) => {
+  await openSettings();
+  if (create) await page.click("#cloud-toggle");
+  await page.fill("#cloud-email", email);
+  await page.fill("#cloud-password", password);
+  await page.click("#cloud-submit");
+};
+const syncNow = async () => {
+  await openSettings();
+  await page.click("#cloud-sync-now");
+  await page.waitForFunction(() => !document.getElementById("cloud-sync-now").disabled && /^(Synced at|Couldn't sync)/.test(document.getElementById("cloud-status").textContent));
+};
+
+// Upgrading: chats written by the previous version are untouched, and
+// nothing about accounts happens until someone signs in.
+const deviceA0 = dev({ a1: { messages: qa("a1 q", "a1 a"), updated: 1000 }, a2: { messages: qa("a2 q", "a2 a"), updated: 2000 } }, { orc_current_chat: "a2" });
+await page.evaluate(() => localStorage.setItem("__skapiFake", "1"));
+await putDevice(deviceA0);
+await page.waitForTimeout(300);
+// The chat keys, byte for byte, in a fixed order (other keys are caches).
+const chatBytes = (d) => JSON.stringify(Object.entries(d).filter(([k]) => /^orc_(chats$|chat_|current_chat$)/.test(k)).sort());
+check("sync: an upgrade leaves existing chats exactly as they were", chatBytes(await takeDevice()) === chatBytes(deviceA0), chatBytes(await takeDevice()));
+check("sync: no account keys are written while signed out", !Object.keys(await takeDevice()).some(k => k.startsWith("orc_cloud")));
+check("sync: nothing is sent anywhere while signed out", (await page.evaluate(() => window.__skapiCalls.length)) === 0 && (await remoteDb()) === null);
+await openSettings();
+check("sync: signed out shows the sign-in form and the local-only note", !(await page.$eval("#cloud-signed-out", e => e.hidden)) && (await page.$eval("#cloud-signed-in", e => e.hidden)) && (await page.textContent("#storage-status")) === "Settings and history are saved on this device only.");
+
+// A failed sign-in changes nothing.
+await signIn("nobody@example.com", "wrong-password");
+await page.waitForFunction(() => document.getElementById("cloud-status").classList.contains("error"));
+check("sync: a failed sign-in is reported and leaves everything alone", (await cloudStatus()) === "Incorrect username or password." && chatBytes(await takeDevice()) === chatBytes(deviceA0) && !(await page.$eval("#cloud-signed-out", e => e.hidden)), await cloudStatus());
+
+// First sign-in: this device's chats go up to the account.
+await signIn("kat@example.com", "secret-one", true);
+await synced();
+let remote = await remoteChats("user-1");
+check("sync: first sign-in uploads the chats already on the device", texts(remote.a1) === "a1 q|a1 a" && texts(remote.a2) === "a2 q|a2 a" && Object.keys(remote).length === 2, JSON.stringify(remote));
+check("sync: local chats are unchanged by the first sign-in", texts((await localChats()).a1) === "a1 q|a1 a" && texts((await localChats()).a2) === "a2 q|a2 a" && Object.keys(await localChats()).length === 2);
+check("sync: status and storage note reflect the account", (await cloudStatus()).includes("2 chats uploaded") && (await page.textContent("#cloud-who")) === "Signed in as kat@example.com." && (await page.textContent("#storage-status")).includes("sync to your account"), await cloudStatus());
+const firstRecords = (await remoteDb()).records;
+check("sync: records are private and keyed by user and chat", firstRecords.every(r => r.table.name === "orc_chats" && r.table.access_group === "private" && r.unique_id === "orc:user-1:" + r.data.id), JSON.stringify(firstRecords.map(r => [r.table, r.unique_id])));
+check("sync: the OpenRouter key and settings are never uploaded", !JSON.stringify(await remoteDb()).includes("sk-or-v1") && !JSON.stringify(await remoteDb()).includes("claude-sonnet-4"));
+check("sync: it uses the shared Skapi project", (await page.evaluate(() => window.__skapiProject)) === "5GJ5SJePWQUiq0jvYr-2ZVgaOLUqOhnse3Hcl8M4d");
+
+// A new message is uploaded shortly after, without asking.
+await page.click("#save-settings");
+await page.evaluate(() => window.__scenarios.push({ kind: "ok", text: "a2 more a" }));
+await send("a2 more q");
+await page.waitForFunction(() => { const db = JSON.parse(localStorage.getItem("__skapi_db")); const r = db.records.find(r => r.data.id === "a2"); return r && r.data.messages.length === 4; }, null, { timeout: 15000 });
+check("sync: a new reply is uploaded automatically", texts((await remoteChats("user-1")).a2) === "a2 q|a2 a|a2 more q|a2 more a");
+await page.waitForFunction(() => /^Synced at/.test(document.getElementById("cloud-status").textContent));
+const deviceA1 = await takeDevice();
+
+// A second device with its own chat: signing in merges both ways.
+await putDevice(dev({ b1: { messages: qa("b1 q", "b1 a"), updated: 3000 } }));
+check("sync: a second device starts signed out", !(await page.$eval("#cloud-signed-out", e => e.hidden)) && (await page.evaluate(() => window.__skapiCalls.length)) === 0);
+await page.evaluate(() => localStorage.setItem("__skapiPage", "2"));   // small pages, to exercise paging
+await signIn("kat@example.com", "secret-one");
+await synced();
+await page.evaluate(() => localStorage.removeItem("__skapiPage"));
+let local = await localChats();
+check("sync: a second device downloads the account's chats (across pages)", texts(local.a1) === "a1 q|a1 a" && texts(local.a2) === "a2 q|a2 a|a2 more q|a2 more a" && texts(local.b1) === "b1 q|b1 a" && Object.keys(local).length === 3, JSON.stringify(local));
+check("sync: and uploads its own chat", texts((await remoteChats("user-1")).b1) === "b1 q|b1 a");
+check("sync: downloaded chats show in the list", await (async () => { await page.click("#save-settings"); await page.click("#open-chats"); const t = await page.$$eval(".chat-title", els => els.map(e => e.textContent)); await page.click("#chats-overlay", { position: { x: 380, y: 400 } }); return t.includes("a1") && t.includes("a2") && t.includes("b1"); })());
+
+// Continue a chat on device B; device A, which hasn't touched it, catches up.
+await page.click("#open-chats");
+await page.click('.chat-row:has(.chat-title:text-is("a1")) .chat-open');
+await page.evaluate(() => window.__scenarios.push({ kind: "ok", text: "a1 from B a" }));
+await send("a1 from B q");
+await page.waitForFunction(() => JSON.parse(localStorage.getItem("__skapi_db")).records.find(r => r.data.id === "a1").data.messages.length === 4, null, { timeout: 15000 });
+await page.waitForFunction(() => /^Synced at/.test(document.getElementById("cloud-status").textContent));
+const deviceB1 = await takeDevice();
+await putDevice(deviceA1);
+await page.waitForFunction(() => JSON.parse(localStorage.getItem("orc_chat_a1") || "[]").length === 4 && !!localStorage.getItem("orc_chat_b1"));
+check("sync: a chat continued elsewhere is brought up to date on reload", texts((await localChats()).a1) === "a1 q|a1 a|a1 from B q|a1 from B a" && texts((await localChats()).b1) === "b1 q|b1 a");
+await synced();
+
+// The open chat is refreshed on screen when it changes underneath.
+await page.click("#open-chats");
+await page.click('.chat-row:has(.chat-title:text-is("a1")) .chat-open');
+await page.evaluate(() => {
+  const db = JSON.parse(localStorage.getItem("__skapi_db"));
+  const r = db.records.find(r => r.data.id === "a1");
+  r.data.messages.push({ role: "user", content: "a1 live q" }, { role: "assistant", content: "a1 live a" });
+  r.data.updated = Date.now(); r.updated = db.clock = Math.max(Date.now(), db.clock + 1);
+  localStorage.setItem("__skapi_db", JSON.stringify(db));
+});
+await syncNow();
+check("sync: the open chat updates on screen", (await page.textContent("#messages")).includes("a1 live a") && (await page.$$(".msg.assistant")).length === 3, await page.textContent("#messages"));
+await page.click("#save-settings");
+
+// Sync failing: nothing is lost, it says so, and it recovers.
+await page.evaluate(() => { localStorage.setItem("__skapiDown", "1"); window.__scenarios.push({ kind: "ok", text: "a2 offline A a" }); });
+await page.click("#open-chats");
+await page.click('.chat-row:has(.chat-title:text-is("a2")) .chat-open');
+await send("a2 offline A q");
+await idle();
+await page.waitForFunction(() => /^Couldn't sync/.test(document.getElementById("cloud-status").textContent), null, { timeout: 15000 });
+check("sync: a failed sync keeps the chat on the device and says so", texts((await localChats()).a2) === "a2 q|a2 a|a2 more q|a2 more a|a2 offline A q|a2 offline A a" && (await cloudStatus()).includes("safe on this device") && await page.$eval("#cloud-status", e => e.classList.contains("error")), await cloudStatus());
+check("sync: still signed in after a network failure", !(await page.$eval("#cloud-signed-in", e => e.hidden)));
+const deviceA2 = await takeDevice();   // holds a change to a2 that never reached the account
+
+// Meanwhile device B changes the same chat differently.
+await page.evaluate(() => localStorage.removeItem("__skapiDown"));
+await putDevice(deviceB1);
+await synced();
+await page.click("#open-chats");
+await page.click('.chat-row:has(.chat-title:text-is("a2")) .chat-open');
+await page.evaluate(() => window.__scenarios.push({ kind: "ok", text: "a2 from B a" }));
+await send("a2 from B q");
+await page.waitForFunction(() => JSON.parse(localStorage.getItem("__skapi_db")).records.find(r => r.data.id === "a2").data.messages.length === 6, null, { timeout: 15000 });
+await page.waitForFunction(() => /^Synced at/.test(document.getElementById("cloud-status").textContent));
+const deviceB2 = await takeDevice();
+
+// Back on A: both versions must survive.
+await putDevice(deviceA2);
+await page.waitForFunction(() => /^Synced at/.test(document.getElementById("cloud-status").textContent) && JSON.parse(localStorage.getItem("orc_chats")).length === 4, null, { timeout: 15000 });
+local = await localChats();
+const copyEntry = Object.entries(local).find(([, c]) => c.title.endsWith("(this device's copy)"));
+check("sync: a chat changed in two places keeps both versions", texts(local.a2) === "a2 q|a2 a|a2 more q|a2 more a|a2 from B q|a2 from B a" && !!copyEntry && texts(copyEntry[1]) === "a2 q|a2 a|a2 more q|a2 more a|a2 offline A q|a2 offline A a", JSON.stringify(Object.fromEntries(Object.entries(local).map(([k, c]) => [k, c.title + ": " + texts(c)]))));
+check("sync: the conflict is explained", (await cloudStatus()).includes("changed in two places, so both versions were kept"), await cloudStatus());
+check("sync: the reader stays on the version they were looking at", (await page.evaluate(() => localStorage.getItem("orc_current_chat"))) === copyEntry[0] && (await page.textContent("#messages")).includes("a2 offline A a"));
+remote = await remoteChats("user-1");
+check("sync: the kept copy is uploaded too", texts(remote[copyEntry[0]]) === texts(copyEntry[1]) && texts(remote.a2).endsWith("a2 from B a"), JSON.stringify(Object.keys(remote)));
+
+// A record the listing missed (index lag) is merged, never overwritten.
+await page.evaluate(() => {
+  const db = JSON.parse(localStorage.getItem("__skapi_db"));
+  db.clock = Math.max(Date.now(), db.clock + 1);
+  db.records.push({ record_id: "lagged", unique_id: "orc:user-1:lag1", user_id: "user-1", table: { name: "orc_chats", access_group: "private" },
+    data: { v: 1, id: "lag1", title: "lag1", created: 1, updated: 1, model: "", messages: [{ role: "user", content: "lag remote q" }, { role: "assistant", content: "lag remote a" }] }, updated: db.clock, uploaded: db.clock });
+  localStorage.setItem("__skapi_db", JSON.stringify(db));
+  localStorage.setItem("__skapiLag", "lag1");
+  const index = JSON.parse(localStorage.getItem("orc_chats"));
+  index.push({ id: "lag1", title: "lag1", created: 5, updated: 5, model: "", count: 2 });
+  localStorage.setItem("orc_chats", JSON.stringify(index));
+  localStorage.setItem("orc_chat_lag1", JSON.stringify([{ role: "user", content: "lag local q" }, { role: "assistant", content: "lag local a" }]));
+});
+await page.reload({ waitUntil: "load" });
+await page.waitForFunction(() => JSON.parse(localStorage.getItem("orc_chats")).some(c => c.id !== "lag1" && c.title === "lag1 (this device's copy)"), null, { timeout: 15000 });
+await page.evaluate(() => localStorage.removeItem("__skapiLag"));
+await page.waitForFunction(() => JSON.parse(localStorage.getItem("__skapi_db")).records.some(r => r.data.title === "lag1 (this device's copy)"), null, { timeout: 15000 });
+local = await localChats();
+remote = await remoteChats("user-1");
+const lagCopy = Object.values(local).find(c => c.title === "lag1 (this device's copy)");
+check("sync: an unseen account copy is merged rather than overwritten", texts(remote.lag1) === "lag remote q|lag remote a" && texts(local.lag1) === "lag remote q|lag remote a" && texts(lagCopy) === "lag local q|lag local a", JSON.stringify([texts(remote.lag1), texts(local.lag1), texts(lagCopy)]));
+await synced();
+
+// Deleting a chat reaches the other device, and doesn't come back.
+await page.click("#open-chats");
+await page.click('.chat-row:has(.chat-title:text-is("b1")) .chat-delete');
+await page.click("#chats-overlay", { position: { x: 380, y: 400 } });
+await page.waitForFunction(() => JSON.parse(localStorage.getItem("__skapi_db")).records.find(r => r.data.id === "b1").data.deleted === true, null, { timeout: 15000 });
+await page.waitForFunction(() => /^Synced at/.test(document.getElementById("cloud-status").textContent));
+await page.reload({ waitUntil: "load" });
+await synced();
+check("sync: a deleted chat stays deleted on the device that deleted it", !(await localChats()).b1 && (await remoteChats("user-1")).b1.deleted === true);
+const deviceA3 = await takeDevice();
+await putDevice(deviceB2);
+await page.waitForFunction(() => /^Synced at/.test(document.getElementById("cloud-status").textContent) && !localStorage.getItem("orc_chat_b1"), null, { timeout: 15000 });
+check("sync: a delete reaches the other device", !(await localChats()).b1 && (await cloudStatus()).includes("deleted on another device"), await cloudStatus());
+check("sync: the other device also receives the conflict copy", Object.values(await localChats()).some(c => c.title === "a2 (this device's copy)"));
+
+// But a chat with changes that were never uploaded outranks a delete made elsewhere.
+await page.evaluate(() => { localStorage.setItem("__skapiDown", "1"); window.__scenarios.push({ kind: "ok", text: "a1 kept a" }); });
+await page.click("#open-chats");
+await page.click('.chat-row:has(.chat-title:text-is("a1")) .chat-open');
+await send("a1 kept q");
+await idle();
+await page.waitForFunction(() => /^Couldn't sync/.test(document.getElementById("cloud-status").textContent), null, { timeout: 15000 });
+await page.evaluate(() => {
+  const db = JSON.parse(localStorage.getItem("__skapi_db"));
+  const r = db.records.find(r => r.data.id === "a1");
+  r.data = { v: 1, id: "a1", deleted: true, updated: Date.now() };
+  r.updated = db.clock = Math.max(Date.now(), db.clock + 1);
+  localStorage.setItem("__skapi_db", JSON.stringify(db));
+  localStorage.removeItem("__skapiDown");
+});
+await syncNow();
+check("sync: unsynced changes outrank a delete made elsewhere", texts((await localChats()).a1).endsWith("a1 kept q|a1 kept a") && texts((await remoteChats("user-1")).a1).endsWith("a1 kept q|a1 kept a"), JSON.stringify([texts((await localChats()).a1), JSON.stringify((await remoteChats("user-1")).a1).slice(0, 120)]));
+
+// Signing out keeps every chat on the device and stops all traffic.
+const beforeSignOut = await localChats();
+await page.click("#cloud-sign-out");
+await page.waitForFunction(() => /^Signed out/.test(document.getElementById("cloud-status").textContent));
+check("sync: signing out keeps the chats on the device", JSON.stringify(await localChats()) === JSON.stringify(beforeSignOut) && (await page.evaluate(() => localStorage.getItem("orc_cloud_user"))) === null && !(await page.$eval("#cloud-signed-out", e => e.hidden)));
+await page.reload({ waitUntil: "load" });
+await page.evaluate(() => window.__scenarios.push({ kind: "ok", text: "signed out a" }));
+await page.click("#open-chats");
+await page.click("#new-chat-btn");
+await send("signed out q");
+await idle();
+await page.waitForTimeout(3600);
+check("sync: chats survive a reload after signing out, and nothing is uploaded", JSON.stringify(Object.keys(await localChats()).sort()).includes("a1") && (await page.evaluate(() => window.__skapiCalls.length)) === 0 && !JSON.stringify(await remoteDb()).includes("signed out q"));
+
+// Signing back in picks up where it left off, including the chat made while signed out.
+await signIn("kat@example.com", "secret-one");
+await synced();
+check("sync: a chat made while signed out is uploaded on the next sign-in", JSON.stringify(await remoteChats("user-1")).includes("signed out q"));
+
+// The session ending (expired or revoked) loses nothing.
+const beforeExpiry = await localChats();
+await page.evaluate(() => { const db = JSON.parse(localStorage.getItem("__skapi_db")); db.session = null; localStorage.setItem("__skapi_db", JSON.stringify(db)); });
+await page.reload({ waitUntil: "load" });
+await page.waitForFunction(() => /expired/.test(document.getElementById("cloud-status").textContent));
+await openSettings();
+check("sync: an expired session keeps every chat and asks to sign in again", JSON.stringify(await localChats()) === JSON.stringify(beforeExpiry) && !(await page.$eval("#cloud-signed-out", e => e.hidden)) && (await page.$eval("#cloud-email", e => e.value)) === "kat@example.com" && (await cloudStatus()).includes("still on this device"), await cloudStatus());
+await page.reload({ waitUntil: "load" });
+await page.waitForFunction(() => /expired/.test(document.getElementById("cloud-status").textContent));
+check("sync: the chats are still there on the next load too", JSON.stringify(await localChats()) === JSON.stringify(beforeExpiry) && (await page.$$(".msg")).length > 0);
+
+// Forgotten password: code by email, new password, sign in.
+await openSettings();
+await page.click("#cloud-forgot");
+check("sync: forgot password asks only for the email", (await page.$eval("#cloud-password", e => e.hidden)) && (await page.textContent("#cloud-submit")) === "Email me a code");
+await page.fill("#cloud-email", "kat@example.com");
+await page.click("#cloud-submit");
+await page.waitForFunction(() => document.getElementById("cloud-submit").textContent === "Set new password");
+await page.fill("#cloud-code", "246810");
+await page.fill("#cloud-password", "secret-two");
+await page.click("#cloud-submit");
+await page.waitForFunction(() => /Password changed/.test(document.getElementById("cloud-status").textContent));
+await signIn("kat@example.com", "secret-two");
+await synced();
+check("sync: a reset password signs in and syncs again", !(await page.$eval("#cloud-signed-in", e => e.hidden)) && JSON.stringify(await localChats()) === JSON.stringify(beforeExpiry));
+
+// Another person signing in on this device: their account gets this
+// device's chats; the first account is not touched.
+const kat = JSON.stringify(await remoteChats("user-1"));
+await page.click("#cloud-sign-out");
+await page.waitForFunction(() => /^Signed out/.test(document.getElementById("cloud-status").textContent));
+await signIn("richard@example.com", "secret-three", true);
+await synced();
+const richard = await remoteChats("user-2");
+check("sync: a different account receives this device's chats", Object.keys(richard).length === Object.keys(await localChats()).length && Object.keys(richard).length > 3, JSON.stringify(Object.keys(richard)));
+check("sync: and the first account is untouched", JSON.stringify(await remoteChats("user-1")) === kat);
+const everything = JSON.stringify(Object.values(await localChats()));
+check("sync: no chat was lost along the way", ["a2 offline A a", "a2 from B a", "a1 kept a", "lag local a", "lag remote a", "signed out a"].every(t => everything.includes(t)), everything.slice(0, 300));
+
+// The real library: vendored, loaded only when someone signs in, and
+// reported cleanly when it can't reach its server.
+const offline = await browser.newContext({ viewport: { width: 390, height: 780 } });
+await offline.addInitScript(fakeFetch);
+await offline.route(url => !String(url).startsWith(BASE), route => route.abort());
+const p2 = await offline.newPage();
+await p2.goto(BASE + "/index.html", { waitUntil: "load" });
+check("sdk: not loaded on a plain visit", await p2.evaluate(() => typeof window.Skapi === "undefined"));
+await p2.click("#open-settings");
+await p2.fill("#cloud-email", "kat@example.com");
+await p2.fill("#cloud-password", "secret-one");
+await p2.click("#cloud-submit");
+await p2.waitForFunction(() => typeof window.Skapi === "function", null, { timeout: 15000 });
+check("sdk: the vendored library loads when signing in", await p2.evaluate(() => !!document.querySelector('script[src="vendor/skapi.js"]')));
+await p2.waitForFunction(() => document.getElementById("cloud-status").classList.contains("error"), null, { timeout: 60000 });
+check("sdk: an unreachable server is an error message, not a broken app", (await p2.textContent("#cloud-status")).length > 0 && !(await p2.$eval("#cloud-signed-out", e => e.hidden)) && !(await p2.$eval("#cloud-submit", e => e.disabled)), await p2.textContent("#cloud-status"));
+
+// A connection that comes back from the background dead but unreported.
+await p2.evaluate(() => { localStorage.setItem("orc_api_key", "sk-or-v1-test"); localStorage.setItem("orc_model", "anthropic/claude-sonnet-4"); });
+await p2.reload({ waitUntil: "load" });
+await p2.clock.install();
+await p2.evaluate(() => { window.__requests = []; window.__scenarios.push({ kind: "hang" }, { kind: "ok", text: "after the stall" }); });
+await p2.fill("#composer", "stall");
+await p2.click("#send-btn");
+await p2.waitForFunction(() => window.__requests.length === 1);
+await p2.clock.fastForward(60000);
+check("stall: a slow reply is left alone while the app stays in the foreground", (await p2.evaluate(() => window.__requests.length)) === 1 && await p2.$eval("#send-btn", b => b.classList.contains("stop")));
+await p2.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
+await p2.clock.fastForward(30000);
+check("stall: silence shorter than the limit after returning is tolerated", (await p2.evaluate(() => window.__requests.length)) === 1);
+await p2.clock.fastForward(20000);
+await p2.waitForFunction(() => window.__requests.length === 2, null, { timeout: 10000 });
+await p2.clock.fastForward(2000);
+await p2.waitForFunction(() => document.querySelector("#messages").textContent.includes("after the stall"));
+check("stall: a dead connection after returning is dropped and retried", (await p2.$$(".msg.error")).length === 0);
+await offline.close();
 
 check("no page errors", errors.length === 0, JSON.stringify(errors));
 console.log(JSON.stringify(results, null, 2));

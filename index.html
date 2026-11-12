@@ -112,6 +112,21 @@
     font-size: 15px;
   }
 
+  /* Text selection on touchscreens. Only message text is selectable: the
+     controls inside a bubble (copy buttons, the footer, code-block headers)
+     and the app chrome are not, so a selection handle dragged near them
+     can't snap onto a button and swallow the rest of the bubble. */
+  header, #input-bar button, #image-options, .msg-actions, .codeblock-head,
+  .retry-btn, .img-thumb, .btn, .icon-btn, .link-btn, .chat-row {
+    -webkit-user-select: none;
+    user-select: none;
+  }
+
+  .msg {
+    -webkit-user-select: text;
+    user-select: text;
+  }
+
   .msg.user {
     background: var(--accent);
     color: var(--accent-text);
@@ -940,6 +955,10 @@
     border-color: rgba(226, 114, 91, 0.3);
   }
 
+  #cloud-box input { margin-top: 6px; }
+  #cloud-box .btn-row { margin-top: 8px; }
+  #cloud-who { font-size: 14px; color: var(--text); overflow-wrap: anywhere; }
+
   .storage-note {
     font-size: 11px;
     color: var(--text-muted);
@@ -1038,7 +1057,7 @@
         <button type="button" class="btn" id="share-btn" hidden>Share…</button>
         <button type="button" class="btn" id="import-btn">Import</button>
       </div>
-      <input type="file" id="import-file" accept="application/json,.json" hidden>
+      <input type="file" id="import-file" accept="application/json,.json,text/plain,.txt" hidden>
       <div id="transfer-status"></div>
       <div class="hint">Export writes every chat and profile to one JSON file; to export just one chat, open it and use Export this chat in settings. Your API key is never included. Import merges: chats you already have are skipped, changed copies are added alongside.</div>
     </div>
@@ -1130,7 +1149,7 @@
     </div>
     <div class="btn-row">
       <button type="button" class="btn" id="export-chat">Export this chat</button>
-      <button type="button" class="btn" id="share-chat" hidden>Share this chat</button>
+      <button type="button" class="btn" id="share-chat">Share this chat</button>
     </div>
     <div class="hint" id="chat-export-status" role="status"></div>
     <div class="btn-row">
@@ -1138,6 +1157,33 @@
     </div>
     <div class="btn-row">
       <button class="btn danger" id="forget-key">Forget API key</button>
+    </div>
+
+    <div class="field" id="cloud-box">
+      <label for="cloud-email">Account and sync (optional)</label>
+      <div id="cloud-signed-out">
+        <form id="cloud-form">
+          <input type="email" id="cloud-email" placeholder="Email" autocomplete="username" autocapitalize="off" spellcheck="false" required>
+          <input type="text" id="cloud-code" placeholder="Code from the email" autocomplete="one-time-code" autocapitalize="off" spellcheck="false" hidden>
+          <input type="password" id="cloud-password" placeholder="Password" minlength="6" maxlength="60" autocomplete="current-password" required>
+          <div class="btn-row">
+            <button type="submit" class="btn primary" id="cloud-submit">Sign in</button>
+          </div>
+        </form>
+        <div class="model-links">
+          <button type="button" class="link-btn" id="cloud-toggle">Create an account</button>
+          <button type="button" class="link-btn" id="cloud-forgot">Forgot password?</button>
+        </div>
+      </div>
+      <div id="cloud-signed-in" hidden>
+        <div id="cloud-who"></div>
+        <div class="btn-row">
+          <button type="button" class="btn" id="cloud-sync-now">Sync now</button>
+          <button type="button" class="btn" id="cloud-sign-out">Sign out</button>
+        </div>
+      </div>
+      <div class="hint" id="cloud-status" role="status"></div>
+      <div class="hint">Without an account everything stays on this device, exactly as before. With one, your chats are also kept in a private store that only you can read, and are merged across your devices. Chats already on this device are uploaded when you first sign in and merged with the account's, never overwritten. Your OpenRouter key, profiles and generated images never leave this device.</div>
     </div>
 
     <div class="warning">
@@ -1208,6 +1254,8 @@
     activeProfile: "orc_active_profile",
     imageModels: "orc_image_models",
     imageOpts: "orc_image_opts",
+    cloudUser: "orc_cloud_user",
+    cloudState: "orc_cloud_state",
     // Left over from the per-device Artificial Analysis key; removed on load.
     legacyAA: ["orc_aa_key", "orc_aa_cache", "orc_aa_attempt"]
   };
@@ -1585,6 +1633,7 @@
       }
     }
     if (m.stopped) bits.push("stopped");
+    if (m.interrupted) bits.push("interrupted");
     return bits.join(" · ");
   }
 
@@ -1630,6 +1679,29 @@
     return el;
   }
 
+  // A reply cut off by a dropped connection is kept as far as it got. This
+  // offers to throw that part away and ask again.
+  function showInterrupted() {
+    var el = showError("The connection dropped before this reply finished, which usually means the app went into the background. The part that arrived was kept.", false);
+    var btn = document.createElement("button");
+    btn.className = "retry-btn";
+    btn.type = "button";
+    btn.textContent = "Regenerate";
+    btn.addEventListener("click", regenerateLast);
+    el.appendChild(btn);
+    return el;
+  }
+
+  function regenerateLast() {
+    if (isStreaming) return;
+    var last = history[history.length - 1];
+    if (!last || last.role !== "assistant" || !last.interrupted) return;
+    history.pop();
+    persistHistory();
+    renderHistory();
+    sendMessage(true);
+  }
+
   function removeTransient() {
     var nodes = messagesEl.querySelectorAll(".transient");
     for (var i = 0; i < nodes.length; i++) nodes[i].remove();
@@ -1650,8 +1722,11 @@
       return;
     }
     history.forEach(appendMessageEl);
-    if (history[history.length - 1].role === "user") {
+    var lastMessage = history[history.length - 1];
+    if (lastMessage.role === "user") {
       showError("No reply was received for the last message.", true);
+    } else if (lastMessage.interrupted) {
+      showInterrupted();
     }
     scrollToBottom(true);
   }
@@ -1679,6 +1754,7 @@
       storageFullWarned = true;
       showError("This device's storage is full, so this chat isn't being saved. Delete some old chats to make room.", false);
     }
+    cloudTouch();
   }
 
   /* ---------------- Chats ---------------- */
@@ -1786,6 +1862,7 @@
     imageDeleteChat(id);
     chats = chats.filter(function (c) { return c.id !== id; });
     storageSet(KEYS.chats, JSON.stringify(chats));
+    cloudNoteDeleted(id);
     if (id === currentChatId) startNewChat();
     renderChatList();
   }
@@ -1835,11 +1912,39 @@
     setTimeout(function () { URL.revokeObjectURL(url); }, 10000);
   }
 
+  // Android's share sheet only takes a short list of file types, and JSON
+  // is not on it: sharing an application/json file is refused with
+  // "Permission denied" even though canShare() said yes. Plain text is on
+  // the list, so shared files go out as .txt. Import reads either.
+  var SHARE_TYPE = "text/plain";
+  // Above this, text is handed over as a file: very long text in a share
+  // intent can be dropped by the receiving app.
+  var SHARE_TEXT_MAX = 100000;
+
+  function shareFileName(fileName) {
+    return fileName.replace(/\.json$/, "") + ".txt";
+  }
+
   function shareJson(obj, fileName, onDone, onError) {
-    var file = new File([JSON.stringify(obj, null, 2)], fileName, { type: "application/json" });
+    var file = new File([JSON.stringify(obj, null, 2)], shareFileName(fileName), { type: SHARE_TYPE });
     navigator.share({ files: [file], title: "OpenRouter Chat export" }).then(onDone).catch(function (e) {
       if (e && e.name !== "AbortError") onError(e);
     });
+  }
+
+  // A chat as readable Markdown, for sharing with a person or another app.
+  function chatAsText(chatId) {
+    var meta = chatMeta(chatId);
+    var messages = chatId === currentChatId ? cleanMessages(history) : loadChat(chatId);
+    var out = ["# " + ((meta && meta.title) || "Chat"), ""];
+    messages.forEach(function (m) {
+      var body = m.content;
+      if (!body && Array.isArray(m.images) && m.images.length) {
+        body = "(" + (m.images.length === 1 ? "A generated image" : m.images.length + " generated images") + ", not included.)";
+      }
+      out.push("## " + (m.role === "user" ? "You" : (m.model || "Assistant")), "", body, "");
+    });
+    return out.join("\n").replace(/\s+$/, "") + "\n";
   }
 
   function setChatExportStatus(text, isError) {
@@ -1855,7 +1960,6 @@
     var ok = currentChatExportable();
     exportChatBtn.disabled = !ok;
     shareChatBtn.disabled = !ok;
-    shareChatBtn.hidden = !canShareFiles();
     setChatExportStatus(ok ? "" : "Nothing to export until this chat has messages.");
   }
 
@@ -1866,12 +1970,34 @@
     setChatExportStatus("Exported \u201c" + meta.title + "\u201d (" + history.length + " message" + (history.length === 1 ? "" : "s") + ").");
   }
 
+  // Shares the open chat as readable text through the system share sheet.
+  // Wherever that is missing or refuses, the text goes to the clipboard
+  // instead, so the button always does something useful.
   function shareCurrentChat() {
     if (!currentChatExportable()) return;
     var meta = chatMeta(currentChatId);
-    shareJson(buildExport(currentChatId), exportFileName(meta.title),
-      function () { setChatExportStatus("Shared."); },
-      function (e) { setChatExportStatus("Couldn't share: " + e.message, true); });
+    var text = chatAsText(currentChatId);
+    var toClipboard = function () {
+      copyText(text).then(function (ok) {
+        if (ok) setChatExportStatus("Sharing isn't available here, so the chat was copied to the clipboard as text.");
+        else setChatExportStatus("Couldn't share or copy this chat. Use Export this chat instead.", true);
+      });
+    };
+    if (!navigator.share) { toClipboard(); return; }
+    var data = { title: meta.title, text: text };
+    if (text.length > SHARE_TEXT_MAX) {
+      var file = new File([text], shareFileName(exportFileName(meta.title)), { type: SHARE_TYPE });
+      var canFile = false;
+      try { canFile = !!(navigator.canShare && navigator.canShare({ files: [file] })); } catch (e) { canFile = false; }
+      if (!canFile) { toClipboard(); return; }
+      data = { title: meta.title, files: [file] };
+    }
+    var shared;
+    try { shared = navigator.share(data); } catch (e) { toClipboard(); return; }
+    shared.then(function () { setChatExportStatus("Shared."); }, function (e) {
+      if (e && e.name === "AbortError") return;   // the share sheet was dismissed
+      toClipboard();
+    });
   }
 
   function setTransferStatus(text, isError) {
@@ -1887,7 +2013,7 @@
   function canShareFiles() {
     try {
       if (!navigator.share || !navigator.canShare) return false;
-      var probe = new File(["{}"], "probe.json", { type: "application/json" });
+      var probe = new File(["{}"], "probe.txt", { type: SHARE_TYPE });
       return navigator.canShare({ files: [probe] });
     } catch (e) {
       return false;
@@ -1895,9 +2021,13 @@
   }
 
   function shareChats() {
-    shareJson(buildExport(), exportFileName(),
+    var data = buildExport();
+    shareJson(data, exportFileName(),
       function () { setTransferStatus("Shared."); },
-      function (e) { setTransferStatus("Couldn't share: " + e.message, true); });
+      function () {
+        downloadJson(data, exportFileName());
+        setTransferStatus("Sharing was refused here, so the export was downloaded instead.");
+      });
   }
 
   // "Same chat" means the same conversation text. Assistant metadata (model,
@@ -1953,6 +2083,7 @@
     });
     chats.sort(function (a, b) { return b.updated - a.updated; });
     if (!storageSet(KEYS.chats, JSON.stringify(chats))) failed++;
+    if (added) cloudTouch();
 
     if (Array.isArray(data.profiles)) {
       data.profiles.forEach(function (p) {
@@ -3010,12 +3141,18 @@
       persistHistory();
       appendMessageEl(entry);
     } else {
+      // The chat may have been deleted while its reply was on the way;
+      // writing it back would leave messages no chat list entry points to.
+      var meta = chatMeta(sendChatId);
+      if (!meta) return;
       var other = loadChat(sendChatId);
       other.push(entry);
       saveChat(sendChatId, other);
-      var meta = chatMeta(sendChatId);
-      if (meta) { meta.updated = Date.now(); meta.count = other.length; meta.model = entry.model || meta.model; }
+      meta.updated = Date.now();
+      meta.count = other.length;
+      meta.model = entry.model || meta.model;
       storageSet(KEYS.chats, JSON.stringify(chats));
+      cloudTouch();
     }
   }
 
@@ -3087,7 +3224,9 @@
         placeholder.remove();
         showError(err && err.name === "AbortError"
           ? "Stopped. A cancelled image isn't billed."
-          : "Image generation failed: " + (err && err.message ? err.message : "unknown error"), true);
+          : err instanceof TypeError
+            ? "The connection dropped while the image was being made, which usually means the app went into the background. It may still have been generated and billed, so check your OpenRouter activity before retrying."
+            : "Image generation failed: " + (err && err.message ? err.message : "unknown error"), true);
       }
     } finally {
       clearInterval(timer);
@@ -3224,6 +3363,46 @@
   });
 
   /* ---------------- Sending / streaming ---------------- */
+  /* Switching apps or tabs on a phone usually kills an open connection, and
+     nothing in a page can prevent that. What the app does instead: if no
+     text had arrived it reconnects by itself once it is back in the
+     foreground and online; if some had, that part is kept and marked
+     interrupted rather than thrown away. */
+  var MAX_RECONNECTS = 2;
+  var STALL_MS = 45000;
+
+  function abortError() {
+    return new DOMException("Aborted", "AbortError");
+  }
+
+  // Resolves once the page is visible and the browser reports a network.
+  function waitForForeground(signal) {
+    return new Promise(function (resolve, reject) {
+      function ready() { return document.visibilityState !== "hidden" && navigator.onLine !== false; }
+      function cleanup() {
+        document.removeEventListener("visibilitychange", check);
+        window.removeEventListener("online", check);
+        signal.removeEventListener("abort", onAbort);
+      }
+      function check() { if (ready()) { cleanup(); resolve(); } }
+      function onAbort() { cleanup(); reject(abortError()); }
+      if (signal.aborted) { reject(abortError()); return; }
+      if (ready()) { resolve(); return; }
+      document.addEventListener("visibilitychange", check);
+      window.addEventListener("online", check);
+      signal.addEventListener("abort", onAbort);
+    });
+  }
+
+  function pause(ms, signal) {
+    return new Promise(function (resolve, reject) {
+      if (signal.aborted) { reject(abortError()); return; }
+      var t = setTimeout(function () { signal.removeEventListener("abort", onAbort); resolve(); }, ms);
+      function onAbort() { clearTimeout(t); reject(abortError()); }
+      signal.addEventListener("abort", onAbort, { once: true });
+    });
+  }
+
   function buildApiMessages() {
     var out = [];
     var sys = storageGet(KEYS.systemPrompt);
@@ -3281,7 +3460,13 @@
     }
 
     setStreamingUI(true);
-    currentAbort = new AbortController();
+    // Stop cancels userAbort. Each connection attempt has its own
+    // controller, so a stalled attempt can be dropped without that
+    // counting as the user pressing Stop.
+    var userAbort = new AbortController();
+    var attemptAbort = null;
+    currentAbort = userAbort;
+    userAbort.signal.addEventListener("abort", function () { if (attemptAbort) attemptAbort.abort(); });
 
     var assistantEl = appendMessageEl({ role: "assistant", content: "" });
     assistantEl.classList.add("streaming");
@@ -3295,6 +3480,10 @@
     var servedModel = null;
     var servedProvider = null;
     var renderTimer = null;
+    var lastActivity = tStart;
+    var resumedAt = 0;
+    var stallTimer = null;
+    var reconnects = 0;
 
     // Full markdown + KaTeX on every token is too heavy for long replies,
     // so during streaming re-render at most every 100 ms.
@@ -3319,7 +3508,54 @@
       fileReply(entry, sendChatId, assistantEl);
     }
 
-    try {
+    function reply(extra) {
+      var entry = { role: "assistant", content: fullText, model: servedModel || model, requested: model, provider: servedProvider, usage: usage };
+      if (extra) entry[extra] = true;
+      return entry;
+    }
+
+    // An HTTP error or an error the model reported. Anything else that goes
+    // wrong mid-request is the connection itself and may be worth retrying.
+    function serverError(message) {
+      var e = new Error(message);
+      e.fromServer = true;
+      return e;
+    }
+
+    function stopStallWatch() {
+      if (stallTimer) { clearInterval(stallTimer); stallTimer = null; }
+    }
+
+    // A phone can come back from the background with the connection dead but
+    // not reported as failed, leaving the reply waiting for ever. So if
+    // nothing at all arrives for STALL_MS after a return to the foreground,
+    // that counts as a drop. OpenRouter sends keep-alive comments while a
+    // model is thinking, so a healthy slow reply is not silent.
+    function onVisibility() {
+      if (document.visibilityState === "hidden") return;
+      resumedAt = performance.now();
+      if (stallTimer) return;
+      stallTimer = setInterval(function () {
+        // Anything arriving after the return proves the connection survived.
+        if (lastActivity > resumedAt) { stopStallWatch(); return; }
+        if (performance.now() - resumedAt < STALL_MS) return;
+        stopStallWatch();
+        if (attemptAbort) attemptAbort.abort();
+      }, 1000);
+    }
+    document.addEventListener("visibilitychange", onVisibility);
+
+    async function streamOnce() {
+      fullText = "";
+      usage = null;
+      tStart = performance.now();
+      tFirst = null;
+      tLast = null;
+      servedModel = null;
+      servedProvider = null;
+      lastActivity = tStart;
+      attemptAbort = new AbortController();
+
       var res = await fetch(OPENROUTER + "/chat/completions", {
         method: "POST",
         headers: {
@@ -3335,12 +3571,12 @@
           // Groups this chat's requests in OpenRouter's logs and Broadcast traces.
           session_id: sendChatId
         }),
-        signal: currentAbort.signal
+        signal: attemptAbort.signal
       });
 
       if (!res.ok || !res.body) {
         var errText = await safeReadError(res);
-        throw new Error("HTTP " + res.status + (errText ? ": " + errText : ""));
+        throw serverError("HTTP " + res.status + (errText ? ": " + errText : ""));
       }
 
       var reader = res.body.getReader();
@@ -3349,6 +3585,7 @@
 
       while (true) {
         var chunk = await reader.read();
+        lastActivity = performance.now();
         if (chunk.done) break;
         buffer += decoder.decode(chunk.value, { stream: true });
 
@@ -3367,7 +3604,7 @@
             continue; // malformed SSE fragment
           }
           if (json.error) {
-            throw new Error(json.error.message || "Model returned an error");
+            throw serverError(json.error.message || "Model returned an error");
           }
           var choice = json.choices && json.choices[0];
           var piece = choice && choice.delta && choice.delta.content;
@@ -3383,21 +3620,63 @@
         }
       }
 
-      if (!fullText) throw new Error("The model returned an empty response");
-      finish({ role: "assistant", content: fullText, model: servedModel || model, requested: model, provider: servedProvider, usage: usage });
-    } catch (err) {
-      if (err.name === "AbortError") {
-        if (fullText) {
-          finish({ role: "assistant", content: fullText, model: servedModel || model, requested: model, provider: servedProvider, usage: usage, stopped: true });
-        } else if (currentChatId === sendChatId) {
-          assistantEl.remove();
-          showError("Stopped before any reply arrived.", true);
+      if (!fullText) throw serverError("The model returned an empty response");
+    }
+
+    function stoppedEmpty() {
+      if (currentChatId !== sendChatId) return;
+      assistantEl.remove();
+      showError("Stopped before any reply arrived.", true);
+    }
+
+    try {
+      for (;;) {
+        try {
+          await streamOnce();
+          finish(reply());
+          break;
+        } catch (err) {
+          var stopped = userAbort.signal.aborted;
+          var dropped = !stopped && !(err && err.fromServer);
+
+          // Nothing had arrived, so asking again loses nothing: wait until
+          // the app is in the foreground and online, then reconnect.
+          if (dropped && !fullText && reconnects < MAX_RECONNECTS) {
+            reconnects++;
+            assistantEl.classList.add("generating");
+            assistantEl.textContent = "Connection lost. Reconnecting…";
+            try {
+              await waitForForeground(userAbort.signal);
+              await pause(500 * reconnects, userAbort.signal);
+            } catch (waitErr) {
+              stoppedEmpty();
+              break;
+            }
+            assistantEl.classList.remove("generating");
+            assistantEl.textContent = "";
+            continue;
+          }
+
+          if (stopped) {
+            if (fullText) finish(reply("stopped"));
+            else stoppedEmpty();
+          } else if (dropped && fullText) {
+            // Part of a reply is worth more than an error message: keep it.
+            finish(reply("interrupted"));
+            if (currentChatId === sendChatId) showInterrupted();
+          } else if (currentChatId === sendChatId) {
+            assistantEl.remove();
+            var why = err && err.message ? err.message : "unknown error";
+            showError(dropped
+              ? "The connection dropped and couldn't be restored (" + why + "). Your message is saved; retry when you're back online."
+              : "Request failed: " + why, true);
+          }
+          break;
         }
-      } else if (currentChatId === sendChatId) {
-        assistantEl.remove();
-        showError("Request failed: " + err.message, true);
       }
     } finally {
+      document.removeEventListener("visibilitychange", onVisibility);
+      stopStallWatch();
       currentAbort = null;
       setStreamingUI(false);
       scrollToBottom(false);
@@ -3954,11 +4233,550 @@
     if (!browseView.hidden) hideBrowse();
   });
 
+  /* ---------------- Account and sync (optional) ----------------
+     Signing in is optional. localStorage stays the source of truth for
+     this device whether or not anyone is signed in: sync only ever adds
+     to it or brings a chat up to date, and a failed or expired sign-in
+     leaves every chat where it was.
+
+     Accounts live in the Skapi project the owner's other apps share, so
+     one login works across them. The project id is not a secret: Skapi
+     decides what each user may read. Its SDK is vendored and only loaded
+     once someone signs in, so signed-out use makes no extra requests.
+
+     Each chat is one record in the private table "orc_chats", readable
+     only by its owner, with the unique id "orc:<user id>:<chat id>". A
+     deleted chat becomes a small { deleted: true } record so the delete
+     reaches other devices. The OpenRouter key, profiles and images are
+     never uploaded.
+
+     Sync pulls first, merges, then pushes. Merging never discards text:
+       - identical on both sides: nothing to do;
+       - one side simply longer: the longer one wins;
+       - this device unchanged since the last sync: the account's copy wins;
+       - changed on both and diverged: both are kept, this device's as a copy.
+     orc_cloud_state remembers, per chat, the "updated" stamp it had when
+     last in step with the account; a chat whose stamp differs is waiting
+     to be pushed. */
+  var SKAPI_PROJECT_ID = "5GJ5SJePWQUiq0jvYr-2ZVgaOLUqOhnse3Hcl8M4d";
+  var CLOUD_TABLE = { name: "orc_chats", access_group: "private" };
+  var CLOUD_DEBOUNCE_MS = 3000;
+  // Skapi's index of "updated since" can lag a write by a moment, so each
+  // pull re-reads a little before the last change it saw.
+  var CLOUD_OVERLAP_MS = 120000;
+
+  var cloudBox = {
+    signedOut: document.getElementById("cloud-signed-out"),
+    signedIn: document.getElementById("cloud-signed-in"),
+    form: document.getElementById("cloud-form"),
+    email: document.getElementById("cloud-email"),
+    code: document.getElementById("cloud-code"),
+    password: document.getElementById("cloud-password"),
+    submit: document.getElementById("cloud-submit"),
+    toggle: document.getElementById("cloud-toggle"),
+    forgot: document.getElementById("cloud-forgot"),
+    who: document.getElementById("cloud-who"),
+    syncNow: document.getElementById("cloud-sync-now"),
+    signOut: document.getElementById("cloud-sign-out"),
+    status: document.getElementById("cloud-status")
+  };
+
+  var skapiPromise = null;
+  var cloudUser = readJson(KEYS.cloudUser, null);   // { id, email, expired? } while signed in on this device
+  if (!cloudUser || typeof cloudUser !== "object" || typeof cloudUser.id !== "string") cloudUser = null;
+  var cloudState = readCloudState();
+  var cloudMode = "login";                          // login | signup | forgot | reset
+  var cloudBusy = false;
+  var cloudSyncing = false;
+  var cloudAgain = false;
+  var cloudTimer = null;
+  var cloudLastSync = 0;
+  var cloudRerender = false;
+  var cloudNote = { text: "", error: false };
+
+  function hasOwn(obj, key) {
+    return Object.prototype.hasOwnProperty.call(obj, key);
+  }
+
+  function errText(e) {
+    return (e && e.message ? String(e.message) : String(e || "")) || "unknown error";
+  }
+
+  function freshCloudState(userId) {
+    return { user: userId || "", cursor: 0, synced: {}, deleted: {} };
+  }
+
+  function readCloudState() {
+    var st = readJson(KEYS.cloudState, null);
+    if (!st || typeof st !== "object" || typeof st.user !== "string") return freshCloudState("");
+    if (typeof st.cursor !== "number") st.cursor = 0;
+    if (!st.synced || typeof st.synced !== "object") st.synced = {};
+    if (!st.deleted || typeof st.deleted !== "object") st.deleted = {};
+    return st;
+  }
+
+  function saveCloudState() {
+    storageSet(KEYS.cloudState, JSON.stringify(cloudState));
+  }
+
+  function cloudActive() {
+    return !!(cloudUser && !cloudUser.expired);
+  }
+
+  function loadSkapi() {
+    if (skapiPromise) return skapiPromise;
+    skapiPromise = new Promise(function (resolve, reject) {
+      function make() {
+        try { resolve(new window.Skapi(SKAPI_PROJECT_ID)); } catch (e) { reject(e); }
+      }
+      if (typeof window.Skapi === "function") { make(); return; }
+      var tag = document.createElement("script");
+      tag.src = "vendor/skapi.js";
+      tag.onload = function () {
+        if (typeof window.Skapi === "function") make();
+        else reject(new Error("The account library didn't load"));
+      };
+      tag.onerror = function () {
+        tag.remove();
+        reject(new Error("Couldn't load the account library. Check your connection"));
+      };
+      document.head.appendChild(tag);
+    });
+    // A failed load is not remembered, so the next attempt starts afresh.
+    skapiPromise.catch(function () { skapiPromise = null; });
+    return skapiPromise;
+  }
+
+  /* ----- Merging ----- */
+  function cloudDirty(meta) {
+    return cloudState.synced[meta.id] !== meta.updated;
+  }
+
+  function isPrefix(shorter, longer) {
+    if (shorter.length > longer.length) return false;
+    for (var i = 0; i < shorter.length; i++) {
+      if (shorter[i].role !== longer[i].role || shorter[i].content !== longer[i].content) return false;
+    }
+    return true;
+  }
+
+  function localMessages(id) {
+    return id === currentChatId ? cleanMessages(history) : loadChat(id);
+  }
+
+  // Writes the account's copy of a chat onto this device. False if storage is full.
+  function cloudStore(d, messages) {
+    if (!saveChat(d.id, messages)) return false;
+    var meta = chatMeta(d.id);
+    if (!meta) {
+      meta = { id: d.id, created: typeof d.created === "number" ? d.created : Date.now() };
+      chats.push(meta);
+    }
+    var firstUser = messages.filter(function (m) { return m.role === "user"; })[0];
+    meta.title = (typeof d.title === "string" && d.title.trim()) || titleFrom(firstUser ? firstUser.content : "");
+    meta.updated = typeof d.updated === "number" && d.updated > 0 ? d.updated : Date.now();
+    meta.model = typeof d.model === "string" ? d.model : "";
+    meta.count = messages.length;
+    cloudState.synced[d.id] = meta.updated;
+    if (d.id === currentChatId) { history = messages; cloudRerender = true; }
+    return true;
+  }
+
+  // Applies one record from the account. Returns what happened: "same",
+  // "pulled", "kept", "copied", "removed", "full" (no room to store it),
+  // "later" (its chat is busy) or "" (not a usable record).
+  function cloudApply(rec) {
+    var d = rec && rec.data;
+    if (!d || typeof d !== "object" || typeof d.id !== "string" || !d.id) return "";
+    var id = d.id;
+    var meta = chatMeta(id);
+    if (isStreaming && id === currentChatId) return "later";
+
+    if (d.deleted) {
+      delete cloudState.deleted[id];
+      if (!meta) return "same";
+      // Changes made here that were never uploaded outrank a delete made
+      // elsewhere: the chat stays and is uploaded again.
+      if (cloudDirty(meta)) return "kept";
+      storageRemove(KEYS.chatPrefix + id);
+      imageDeleteChat(id);
+      chats = chats.filter(function (c) { return c.id !== id; });
+      delete cloudState.synced[id];
+      if (id === currentChatId) {
+        currentChatId = null;
+        history = [];
+        storageRemove(KEYS.currentChat);
+        cloudRerender = true;
+      }
+      return "removed";
+    }
+
+    var remote = cleanMessages(d.messages);
+    if (!remote.length) return "";
+    if (!meta) {
+      if (hasOwn(cloudState.deleted, id)) return "same";   // deleted here; that delete is about to be uploaded
+      return cloudStore(d, remote) ? "pulled" : "full";
+    }
+    var local = localMessages(id);
+    if (sameMessages(local, remote)) {
+      cloudState.synced[id] = meta.updated;
+      return "same";
+    }
+    if (!cloudDirty(meta)) return cloudStore(d, remote) ? "pulled" : "full";
+    if (isPrefix(remote, local)) return "kept";
+    if (isPrefix(local, remote)) return cloudStore(d, remote) ? "pulled" : "full";
+
+    // Changed in both places. Keep this device's version as a separate
+    // chat and let the original id carry the account's version. (Images
+    // belong to the original id, so deleting that chat later also removes
+    // the pictures the copy points to.)
+    var copyId = newId();
+    if (!saveChat(copyId, local)) return "full";
+    chats.push({ id: copyId, title: (meta.title || "Untitled chat") + " (this device's copy)", created: meta.created,
+      updated: Date.now(), model: meta.model || "", count: local.length });
+    if (id === currentChatId) {
+      currentChatId = copyId;
+      storageSet(KEYS.currentChat, copyId);
+    }
+    cloudStore(d, remote);
+    return "copied";
+  }
+
+  /* ----- Talking to Skapi ----- */
+  async function cloudList(sk, since) {
+    var query = { table: CLOUD_TABLE };
+    if (since > 0) query.index = { name: "$updated", value: since, condition: ">" };
+    var out = [];
+    var res = await sk.getRecords(query, { limit: 100 });
+    for (;;) {
+      var list = res && Array.isArray(res.list) ? res.list : [];
+      for (var i = 0; i < list.length; i++) out.push(list[i]);
+      if (!res || res.endOfList || !list.length) break;
+      res = await sk.getRecords(query, { limit: 100, fetchMore: true });
+    }
+    return out;
+  }
+
+  function cloudUid(userId, chatId) {
+    return "orc:" + userId + ":" + chatId;
+  }
+
+  // Creates the record, or updates it if this device knows it exists.
+  // Resolves "taken" when a record this device has not seen holds the id.
+  async function cloudPut(sk, userId, id, data) {
+    var uid = cloudUid(userId, id);
+    var create = function () { return sk.postRecord(data, { unique_id: uid, table: CLOUD_TABLE }); };
+    var update = function () { return sk.postRecord(data, { record_id: uid }); };
+    var known = hasOwn(cloudState.synced, id);
+    try {
+      return await (known ? update() : create());
+    } catch (e) {
+      var msg = errText(e);
+      if (known && /no access to update|not exist/i.test(msg)) return create();
+      if (!known && /already taken/i.test(msg)) return "taken";
+      throw e;
+    }
+  }
+
+  async function cloudPushChat(sk, userId, id) {
+    for (var attempt = 0; attempt < 2; attempt++) {
+      var meta = chatMeta(id);
+      if (!meta || !cloudDirty(meta)) return false;
+      var messages = localMessages(id);
+      if (!messages.length) return false;
+      var stamp = meta.updated;
+      var res = await cloudPut(sk, userId, id, { v: 1, id: id, title: meta.title || "", created: meta.created || stamp,
+        updated: stamp, model: meta.model || "", messages: messages });
+      if (res !== "taken") {
+        cloudState.synced[id] = stamp;
+        return true;
+      }
+      // The account already has a chat with this id that the pull did not
+      // show. Merge it like any other, then upload whatever is still new.
+      var got = await sk.getRecords({ unique_id: cloudUid(userId, id) });
+      var rec = got && Array.isArray(got.list) ? got.list[0] : null;
+      if (rec && cloudApply(rec) === "copied") cloudAgain = true;   // the copy goes up on the next pass
+      if (!hasOwn(cloudState.synced, id)) cloudState.synced[id] = 0;
+    }
+    return false;
+  }
+
+  async function cloudPushDelete(sk, userId, id) {
+    try {
+      await sk.postRecord({ v: 1, id: id, deleted: true, updated: cloudState.deleted[id] || Date.now() },
+        { record_id: cloudUid(userId, id) });
+    } catch (e) {
+      // Never uploaded, or already gone: nothing to mark as deleted.
+      if (!/no access to update|not exist/i.test(errText(e))) throw e;
+    }
+    delete cloudState.deleted[id];
+  }
+
+  function setCloudNote(text, isError) {
+    cloudNote = { text: text || "", error: !!isError };
+    renderCloud();
+  }
+
+  function plural(n, word) {
+    return n + " " + word + (n === 1 ? "" : "s");
+  }
+
+  // full: re-read every record instead of only those changed since last time.
+  async function cloudSync(full) {
+    if (!cloudActive()) return;
+    if (cloudSyncing) { cloudAgain = true; return; }
+    if (isStreaming) { cloudTouch(); return; }
+    clearTimeout(cloudTimer);
+    cloudTimer = null;
+    cloudSyncing = true;
+    cloudRerender = false;
+    var userId = cloudUser.id;
+    var still = function () { return cloudActive() && cloudUser.id === userId; };
+    var tally = { pulled: 0, pushed: 0, copied: 0, removed: 0, full: 0, failed: 0, error: "" };
+    var sk = null;
+    setCloudNote("Syncing…");
+    try {
+      sk = await loadSkapi();
+      var list = await cloudList(sk, full ? 0 : Math.max(0, cloudState.cursor - CLOUD_OVERLAP_MS));
+      if (!still()) return;
+
+      var newest = cloudState.cursor;
+      var hold = false;
+      var seen = {};
+      list.forEach(function (rec) {
+        var out = cloudApply(rec);
+        if (rec && rec.data && typeof rec.data.id === "string") seen[rec.data.id] = true;
+        if (hasOwn(tally, out)) tally[out]++;
+        if (out === "full" || out === "later") hold = true;
+        if (rec && typeof rec.updated === "number" && rec.updated > newest) newest = rec.updated;
+      });
+      // A record that could not be applied must be offered again next time.
+      if (!hold) cloudState.cursor = newest;
+      // A chat this device thought was uploaded but the account no longer
+      // has is uploaded again, never removed.
+      if (full) Object.keys(cloudState.synced).forEach(function (id) { if (!seen[id]) delete cloudState.synced[id]; });
+      chats.sort(function (a, b) { return b.updated - a.updated; });
+      storageSet(KEYS.chats, JSON.stringify(chats));
+      saveCloudState();
+
+      var pending = chats.filter(cloudDirty).map(function (c) { return c.id; });
+      for (var i = 0; i < pending.length; i++) {
+        if (!still()) return;
+        if (isStreaming && pending[i] === currentChatId) { cloudAgain = true; continue; }
+        try {
+          if (await cloudPushChat(sk, userId, pending[i])) tally.pushed++;
+        } catch (e) {
+          tally.failed++;
+          tally.error = errText(e);
+        }
+      }
+      var gone = Object.keys(cloudState.deleted);
+      for (var j = 0; j < gone.length; j++) {
+        if (!still()) return;
+        try {
+          await cloudPushDelete(sk, userId, gone[j]);
+        } catch (e) {
+          tally.failed++;
+          tally.error = errText(e);
+        }
+      }
+      storageSet(KEYS.chats, JSON.stringify(chats));
+      saveCloudState();
+      cloudLastSync = Date.now();
+
+      var bits = [];
+      if (tally.pulled) bits.push(plural(tally.pulled, "chat") + " downloaded");
+      if (tally.pushed) bits.push(plural(tally.pushed, "chat") + " uploaded");
+      if (tally.copied) bits.push(plural(tally.copied, "chat") + " changed in two places, so both versions were kept");
+      if (tally.removed) bits.push(plural(tally.removed, "chat") + " deleted on another device removed here");
+      var note = "Synced at " + formatWhen(cloudLastSync) + (bits.length ? ": " + bits.join(", ") : "") + ".";
+      if (tally.full) note += " This device's storage is full, so " + plural(tally.full, "chat") + " from your account couldn't be saved here.";
+      if (tally.failed) note += " " + plural(tally.failed, "change") + " couldn't be uploaded (" + tally.error + ") and will be tried again; they are safe on this device.";
+      setCloudNote(note, tally.full > 0 || tally.failed > 0);
+    } catch (e) {
+      if (still()) {
+        setCloudNote("Couldn't sync (" + errText(e) + "). Your chats are safe on this device and will sync later.", true);
+        cloudCheckSession(sk);
+      }
+    } finally {
+      cloudSyncing = false;
+      updateChatTitle();
+      if (cloudRerender && !isStreaming) renderHistory();
+      if (chatsOverlay.classList.contains("open")) renderChatList();
+      renderCloud();
+      if (cloudAgain) { cloudAgain = false; cloudTouch(); }
+    }
+  }
+
+  // Schedules a sync shortly after a change, so a burst of changes is one sync.
+  function cloudTouch() {
+    if (!cloudActive()) return;
+    clearTimeout(cloudTimer);
+    cloudTimer = setTimeout(function () { cloudTimer = null; cloudSync(); }, CLOUD_DEBOUNCE_MS);
+  }
+
+  // Remembers a delete so it can be passed on. Kept even while signed out,
+  // so it still reaches the account the next time the same user signs in.
+  function cloudNoteDeleted(id) {
+    if (!hasOwn(cloudState.synced, id)) return;
+    delete cloudState.synced[id];
+    cloudState.deleted[id] = Date.now();
+    saveCloudState();
+    cloudTouch();
+  }
+
+  /* ----- Signing in and out ----- */
+  function cloudAdopt(profile) {
+    // A different account starts from scratch: this device's chats are
+    // then merged into it like any first sign-in.
+    if (cloudState.user !== profile.user_id) cloudState = freshCloudState(profile.user_id);
+    cloudUser = { id: profile.user_id, email: typeof profile.email === "string" ? profile.email : "" };
+    storageSet(KEYS.cloudUser, JSON.stringify(cloudUser));
+    saveCloudState();
+  }
+
+  function cloudExpire() {
+    if (!cloudUser) return;
+    cloudUser.expired = true;
+    storageSet(KEYS.cloudUser, JSON.stringify(cloudUser));
+    cloudBox.email.value = cloudUser.email || "";
+    setCloudNote("Your sign-in has expired. Your chats are still on this device; sign in again to keep syncing.", true);
+  }
+
+  // After a failed sync, find out whether the session itself has ended.
+  function cloudCheckSession(sk) {
+    if (!sk) return;
+    Promise.resolve().then(function () { return sk.getProfile(); }).then(function (profile) {
+      if (!profile && cloudActive()) cloudExpire();
+    }, function () { /* offline: the session is left as it is */ });
+  }
+
+  async function cloudAuth(mode, email, password, code) {
+    var sk = await loadSkapi();
+    if (mode === "forgot") {
+      await sk.forgotPassword({ email: email });
+      cloudMode = "reset";
+      return "A code has been emailed to you. Enter it here with a new password.";
+    }
+    if (mode === "reset") {
+      await sk.resetPassword({ email: email, code: code, new_password: password });
+      cloudMode = "login";
+      return "Password changed. Sign in with the new one.";
+    }
+    var res = mode === "signup"
+      ? await sk.signup({ email: email, password: password }, { login: true })
+      : await sk.login({ email: email, password: password });
+    var profile = res && typeof res === "object" && res.user_id ? res : await sk.getProfile();
+    cloudMode = "login";
+    if (!profile || !profile.user_id) return "Account created. Confirm it from the email you were sent, then sign in.";
+    cloudAdopt(profile);
+    cloudSync(true);
+    return "";
+  }
+
+  async function cloudSignOut() {
+    if (cloudBusy) return;
+    cloudBusy = true;
+    renderCloud();
+    await cloudSync();                       // one last upload; failing is fine, nothing local is lost
+    try {
+      var sk = await loadSkapi();
+      await sk.logout();
+    } catch (e) { /* offline: forget the sign-in on this device anyway */ }
+    clearTimeout(cloudTimer);
+    cloudTimer = null;
+    cloudUser = null;
+    storageRemove(KEYS.cloudUser);
+    cloudBusy = false;
+    setCloudNote("Signed out. Your chats are still on this device.");
+  }
+
+  // On load: if this device was signed in, check the session and sync.
+  async function cloudResume() {
+    if (!cloudUser) return;
+    if (cloudUser.expired) { cloudExpire(); return; }
+    var profile;
+    try {
+      var sk = await loadSkapi();
+      profile = await sk.getProfile();
+    } catch (e) {
+      setCloudNote("Couldn't reach your account just now. Your chats are on this device and will sync later.");
+      return;
+    }
+    if (!profile || !profile.user_id) { cloudExpire(); return; }
+    if (profile.user_id !== cloudUser.id) cloudAdopt(profile);
+    cloudSync();
+  }
+
+  function renderCloud() {
+    var signedIn = cloudActive();
+    cloudBox.signedIn.hidden = !signedIn;
+    cloudBox.signedOut.hidden = signedIn;
+    if (signedIn) {
+      cloudBox.who.textContent = "Signed in as " + (cloudUser.email || "your account") + ".";
+      cloudBox.syncNow.disabled = cloudBusy || cloudSyncing;
+      cloudBox.signOut.disabled = cloudBusy;
+    } else {
+      cloudBox.code.hidden = cloudMode !== "reset";
+      cloudBox.code.required = cloudMode === "reset";
+      cloudBox.password.hidden = cloudMode === "forgot";
+      cloudBox.password.required = cloudMode !== "forgot";
+      cloudBox.password.placeholder = cloudMode === "reset" ? "New password" : cloudMode === "signup" ? "Password (6 characters or more)" : "Password";
+      cloudBox.password.autocomplete = cloudMode === "login" ? "current-password" : "new-password";
+      cloudBox.submit.textContent = { login: "Sign in", signup: "Create account", forgot: "Email me a code", reset: "Set new password" }[cloudMode];
+      cloudBox.submit.disabled = cloudBusy;
+      cloudBox.toggle.textContent = cloudMode === "login" ? "Create an account" : "Have an account? Sign in";
+      cloudBox.forgot.hidden = cloudMode !== "login";
+    }
+    cloudBox.status.textContent = cloudNote.text;
+    cloudBox.status.classList.toggle("error", cloudNote.error);
+    updateStorageStatus();
+  }
+
+  cloudBox.form.addEventListener("submit", function (e) {
+    e.preventDefault();
+    if (cloudBusy) return;
+    var mode = cloudMode;
+    cloudBusy = true;
+    setCloudNote(mode === "signup" ? "Creating your account…" : mode === "login" ? "Signing in…" : "Working…");
+    cloudAuth(mode, cloudBox.email.value.trim(), cloudBox.password.value, cloudBox.code.value.trim()).then(function (note) {
+      cloudBox.password.value = "";
+      cloudBox.code.value = "";
+      cloudBusy = false;
+      if (note) setCloudNote(note); else renderCloud();
+    }, function (err) {
+      cloudBusy = false;
+      setCloudNote(errText(err), true);
+    });
+  });
+  cloudBox.toggle.addEventListener("click", function () {
+    cloudMode = cloudMode === "login" ? "signup" : "login";
+    setCloudNote("");
+  });
+  cloudBox.forgot.addEventListener("click", function () {
+    cloudMode = "forgot";
+    setCloudNote("Enter your email and a reset code will be sent to it.");
+  });
+  cloudBox.syncNow.addEventListener("click", function () { cloudSync(true); });
+  cloudBox.signOut.addEventListener("click", cloudSignOut);
+
+  document.addEventListener("visibilitychange", function () {
+    if (!cloudActive()) return;
+    if (document.visibilityState === "hidden") {
+      if (cloudTimer) cloudSync();           // don't sit on a pending upload while going into the background
+    } else if (Date.now() - cloudLastSync > 60000) {
+      cloudSync();
+    }
+  });
+  window.addEventListener("online", function () { if (cloudActive()) cloudSync(); });
+
   /* ---------------- Storage status banner ---------------- */
   function updateStorageStatus() {
     storageStatus.textContent = usingMemoryFallback
       ? "Note: persistent storage isn't available here — settings and history will clear when this page closes."
-      : "Settings and history are saved on this device only.";
+      : cloudActive()
+        ? "Settings and history are saved on this device. Chats also sync to your account."
+        : "Settings and history are saved on this device only.";
   }
 
   /* ---------------- Service worker ---------------- */
@@ -3973,12 +4791,13 @@
   updateChatTitle();
   renderHistory();
   updateComposerEnabled();
-  updateStorageStatus();
+  renderCloud();
   KEYS.legacyAA.forEach(storageRemove);
   updateAAStatus();
   var savedKeyOnLoad = storageGet(KEYS.apiKey);
   if (savedKeyOnLoad) fetchModels(savedKeyOnLoad);
   loadAAScores();
+  cloudResume();
 })();
 </script>
 </body>
