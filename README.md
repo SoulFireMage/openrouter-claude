@@ -13,6 +13,11 @@ just static files.
   `localStorage`, on your device only. It is sent **directly from your browser
   to `openrouter.ai`** over HTTPS with every chat request — it never passes
   through any other server, because there is no other server.
+- Accounts are optional. Signed out, nothing leaves the device except your
+  requests to OpenRouter. Signed in (settings, "Account and sync"), your chats
+  are also stored in a private [Skapi](https://www.skapi.com) table that only
+  your account can read, so they follow you between devices. The API key,
+  profiles and generated images are never uploaded.
 - If `localStorage` isn't available for some reason (private browsing, a
   restrictive embedded browser, etc.), the app falls back to holding your key
   and history in memory for that session instead of breaking.
@@ -25,12 +30,31 @@ just static files.
   stops any reply still streaming; the partial reply is kept in its own chat.
 - Streaming replies with a **Stop** button (partial text is kept).
 - **Retry** on any failed request, including one left dangling by a reload.
+- Survives being put in the background. A phone usually cuts the connection
+  when you switch apps or tabs, and a page can't prevent that. If no text had
+  arrived yet, the app reconnects by itself once it is back in front and
+  online (up to two attempts). If part of a reply had arrived, that part is
+  kept and marked "interrupted", with a **Regenerate** button, rather than
+  being replaced by an error. Image requests are not retried automatically,
+  because a dropped one may still have been billed.
+- Optional account and sync. Sign in or create an account in settings to keep
+  chats in step across devices; without one the app behaves exactly as
+  before. The chats already on a device are uploaded at the first sign-in and
+  merged with the account's. Merging never discards text: if a chat was
+  changed on two devices, both versions are kept. Deleting a chat deletes it
+  on your other devices too. Signing out, an expired session or a failed sync
+  all leave every chat on the device. The Skapi library is only loaded once
+  you sign in.
 - Export and import: the chats drawer writes every chat and profile to one
   JSON file (never the API key), with a Share button on phones that support
   it. The drawer's Export, Share and Import buttons stay on screen however
   long the chat list is. To export only the conversation you're in, use
-  Export this chat (or Share this chat) in settings; it writes the same
-  format, so either kind of file can be imported. Import merges: unchanged
+  Export this chat in settings; it writes the same format, so either kind of
+  file can be imported. Share this chat hands the conversation to the share
+  sheet as readable text (as a `.txt` file if it is very long), and copies it
+  to the clipboard where sharing isn't available or is refused. Shared
+  exports are `.txt` files too, because Android refuses to share `.json`.
+  Import merges: unchanged
   chats are skipped, changed ones are added as copies, nothing already on the
   device is overwritten. Generated images aren't included in exports.
 - Profiles: named snapshots of model, system prompt and picker filters,
@@ -173,11 +197,15 @@ Analysis API; its first live run happens once the `AA_API_KEY` secret exists.
 Vendored under `vendor/` so the app works offline and depends on no CDN:
 [marked](https://github.com/markedjs/marked) (MIT),
 [DOMPurify](https://github.com/cure53/DOMPurify) (Apache-2.0 / MPL-2.0),
-[KaTeX](https://katex.org) (MIT). Licences are alongside the files.
+[KaTeX](https://katex.org) (MIT),
+[skapi-js](https://www.npmjs.com/package/skapi-js) 2.2.31 (Apache-2.0; loaded
+only when signing in). Licences are alongside the files.
 
 ## Ideas for later
 
-- Export a single chat as Markdown for sharing.
+- Sync profiles and the system prompt as well as chats.
+- Client-side encryption of synced chats (Skapi supports it, at the cost of a
+  recovery code to look after).
 - Streamed previews for the image models that support them.
 - Optionally include images in exports.
 - Attach your own photos, as references for image models and as input for

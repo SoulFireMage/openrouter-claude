@@ -1,5 +1,5 @@
 // Bump this when you change index.html/manifest/icon so clients pick up the new shell.
-const CACHE_NAME = "orc-shell-v22";
+const CACHE_NAME = "orc-shell-v23";
 
 const SHELL_FILES = [
   "./",
@@ -29,7 +29,8 @@ const SHELL_FILES = [
   "./vendor/katex/katex.min.css",
   "./vendor/katex/katex.min.js",
   "./vendor/marked.umd.js",
-  "./vendor/purify.min.js"
+  "./vendor/purify.min.js",
+  "./vendor/skapi.js"
 ];
 
 self.addEventListener("install", function (event) {
