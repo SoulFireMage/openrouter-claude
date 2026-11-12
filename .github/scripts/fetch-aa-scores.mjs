@@ -7,7 +7,7 @@
 import { readFile, writeFile, mkdir } from "node:fs/promises";
 
 const OUT = "data/aa-models.json";
-const SOURCE = process.env.AA_URL || "https://artificialanalysis.ai/api/v2/data/llms/models";
+const SOURCE = process.env.AA_URL || "https://artificialanalysis.ai/api/v2/language/models/free";
 const MAX_AGE_DAYS = 7;
 const MIN_MODELS = 20; // refuse to replace good data with a suspiciously small response
 const force = process.env.FORCE === "true";
