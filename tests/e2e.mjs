@@ -9,7 +9,9 @@ const fakeFetch = () => {
   window.__requests = [];
   window.__scenarios = [];
   const realFetch = window.fetch.bind(window);
-  const sse = (events, delayMs = 0, signal) => new ReadableStream({
+  // end: "done" (normal), "drop" (connection breaks after the events) or
+  // "hang" (stays open and silent until aborted).
+  const sse = (events, delayMs = 0, signal, end = "done") => new ReadableStream({
     async start(ctrl) {
       const enc = new TextEncoder();
       let aborted = false;
@@ -20,6 +22,8 @@ const fakeFetch = () => {
         ctrl.enqueue(enc.encode(typeof e === "string" ? e : "data: " + JSON.stringify(e) + "\n\n"));
       }
       if (aborted) return;
+      if (end === "drop") { await new Promise(r => setTimeout(r, 50)); ctrl.error(new TypeError("network error")); return; }
+      if (end === "hang") return;
       ctrl.enqueue(enc.encode("data: [DONE]\n\n"));
       ctrl.close();
     }
@@ -169,10 +173,16 @@ const fakeFetch = () => {
     }
     const words = (sc.text || "").split(/(?<=\s)/);
     const served = sc.servedModel || JSON.parse(opts.body).model;
-    const events = words.map(w => ({ model: served, provider: "MockProvider", choices: [{ delta: { content: w } }] }));
+    // Reasoning arrives first, as OpenRouter sends it: the same text in
+    // delta.reasoning and delta.reasoning_details.
+    const thoughts = sc.reasoning ? sc.reasoning.split(/(?<=\s)/) : [];
+    const events = thoughts.map(w => ({ model: served, provider: "MockProvider",
+      choices: [{ delta: { content: "", reasoning: w, reasoning_details: [{ type: "reasoning.text", text: w, index: 0 }] } }] }));
+    if (sc.detailsOnly) events.forEach(e => { delete e.choices[0].delta.reasoning; });
+    if (sc.text) words.forEach(w => events.push({ model: served, provider: "MockProvider", choices: [{ delta: { content: w } }] }));
     if (sc.kind === "midstream-error") events.push({ error: { message: sc.message } });
-    else events.push({ choices: [{ delta: {}, finish_reason: "stop" }], usage: { prompt_tokens: 12, completion_tokens: words.length, cost: 0.00042 } });
-    const body = sse(events, sc.delayMs || 0, opts.signal);
+    else if (sc.kind !== "drop" && sc.kind !== "hang") events.push({ choices: [{ delta: {}, finish_reason: sc.finishReason || "stop" }], usage: { prompt_tokens: 12, completion_tokens: thoughts.length + words.length, cost: 0.00042 } });
+    const body = sse(events, sc.delayMs || 0, opts.signal, sc.kind === "drop" || sc.kind === "hang" ? sc.kind : "done");
     return new Response(body, { status: 200, headers: { "Content-Type": "text/event-stream" } });
   };
 };
@@ -337,7 +347,7 @@ check("no dangling streaming bubble", (await page.$$(".msg.assistant.streaming")
 await page.evaluate(() => window.__scenarios.push({ kind: "ok", text: "one two three four five six seven eight nine ten", delayMs: 150 }));
 await page.click(".retry-btn");
 await page.waitForFunction(() => document.querySelector("#send-btn").classList.contains("stop"));
-await page.waitForFunction(() => (document.querySelector(".msg.assistant.streaming") || {}).textContent?.length > 8);
+await page.waitForFunction(() => (document.querySelector(".msg.assistant.streaming .msg-body") || {}).textContent?.length > 8);
 await page.click("#send-btn");
 await page.waitForFunction(() => !document.querySelector("#send-btn").classList.contains("stop"));
 const lastHtml = (await assistantTexts()).pop();
@@ -392,7 +402,7 @@ check("switch back restores old chat", (await page.textContent("#chat-title")) =
 // Switch away mid-stream: reply must land in the chat it was sent from.
 await page.evaluate(() => window.__scenarios.push({ kind: "ok", text: "slow one two three four five six", delayMs: 120 }));
 await page.click(".retry-btn");
-await page.waitForFunction(() => (document.querySelector(".msg.assistant.streaming") || {}).textContent?.length > 4);
+await page.waitForFunction(() => (document.querySelector(".msg.assistant.streaming .msg-body") || {}).textContent?.length > 4);
 await page.click("#open-chats");
 await page.click(`.chat-row:nth-child(1) .chat-open`);
 await page.waitForTimeout(1200);
@@ -1080,6 +1090,125 @@ const openInAll = allFullFile.chats.find(c => c.id === fullChatId);
 check("export: full export includes the open chat's unsaved messages", openInAll && openInAll.messages.length === 4, JSON.stringify(openInAll && openInAll.messages.length));
 await page.evaluate(() => { Storage.prototype.setItem = window.__realSetItem; });
 await page.click("#chats-overlay", { position: { x: 380, y: 400 } });
+
+// Reasoning ("thinking") models, broken streams and the screen wake lock.
+await page.click("#open-chats");
+await page.click("#new-chat-btn");
+await page.evaluate(() => {
+  window.__locks = { taken: 0, released: 0, held: 0 };
+  Object.defineProperty(navigator, "wakeLock", { configurable: true, value: { request: async (type) => {
+    window.__locks.taken++; window.__locks.held++;
+    const lock = new EventTarget();
+    lock.type = type;
+    lock.release = async () => { window.__locks.released++; window.__locks.held--; lock.dispatchEvent(new Event("release")); };
+    return lock;
+  } } });
+});
+// The last assistant bubble (":last-of-type" would match by tag, and an
+// error bubble can follow it).
+const lastAssistant = () => page.$$eval(".msg.assistant", els => {
+  const el = els[els.length - 1];
+  return {
+    summary: el.querySelector(".thinking summary")?.textContent || "",
+    thinking: el.querySelector(".thinking-body")?.textContent || "",
+    open: !!el.querySelector(".thinking")?.open,
+    body: el.querySelector(".msg-body")?.textContent || "",
+    meta: el.querySelector(".meta")?.textContent || "",
+    strong: el.querySelectorAll(".msg-body strong").length
+  };
+});
+const doneStreaming = () => page.waitForFunction(() => !document.querySelector("#send-btn").classList.contains("stop"));
+
+const thought = "The reader wants a dragon story. Keep it short and warm. ";
+await page.evaluate((r) => window.__scenarios.push({ kind: "ok", reasoning: r, text: "Once upon a time, a **dragon** slept.", delayMs: 120 }), thought);
+await page.fill("#composer", "tell me a story");
+await page.click("#send-btn");
+await page.waitForSelector(".msg.assistant.streaming .thinking.live");
+check("thinking: waiting status before the first token", (await page.textContent(".thinking.live summary")).startsWith("Waiting for the model"), await page.textContent(".thinking.live summary"));
+check("thinking: screen wake lock held while streaming", await page.evaluate(() => window.__locks.held === 1 && window.__locks.taken === 1), JSON.stringify(await page.evaluate(() => window.__locks)));
+await page.waitForFunction(() => (document.querySelector(".thinking.live summary") || {}).textContent?.startsWith("Thinking…"));
+check("thinking: live status says thinking, folded away", !(await page.$eval(".thinking.live", d => d.open)) && /Thinking… \d+s · \d+ words/.test(await page.textContent(".thinking.live summary")), await page.textContent(".thinking.live summary"));
+await doneStreaming();
+let la = await lastAssistant();
+check("thinking: reply rendered below the reasoning", la.body.includes("Once upon a time, a dragon slept.") && la.strong === 1, JSON.stringify(la));
+check("thinking: reasoning shown once, not doubled", la.thinking === thought, JSON.stringify(la.thinking));
+check("thinking: finished label", /^Thought for \d+s · 11 words$/.test(la.summary) && !la.open, la.summary);
+check("thinking: wake lock released afterwards", await page.evaluate(() => window.__locks.held === 0 && window.__locks.released === 1), JSON.stringify(await page.evaluate(() => window.__locks)));
+let stored2 = (await curChat()).pop();
+check("thinking: reasoning stored with the reply", stored2.reasoning === thought && stored2.content.startsWith("Once upon") && typeof stored2.timing.think === "number", JSON.stringify(stored2));
+await page.reload({ waitUntil: "load" });
+await page.waitForTimeout(300);
+la = await lastAssistant();
+check("thinking: reasoning survives reload", la.thinking === thought && la.summary.startsWith("Thought for"), JSON.stringify(la));
+await page.evaluate(() => {
+  Object.defineProperty(navigator, "wakeLock", { configurable: true, value: { request: async () => { throw new DOMException("Not allowed", "NotAllowedError"); } } });
+});
+
+// Only reasoning_details (no plain reasoning field) still shows the thinking.
+await page.evaluate(() => window.__scenarios.push({ kind: "ok", reasoning: "Detail one. Detail two. ", detailsOnly: true, text: "Fine." }));
+await page.fill("#composer", "details only");
+await page.click("#send-btn");
+await doneStreaming();
+la = await lastAssistant();
+check("thinking: reasoning_details alone are shown", la.thinking === "Detail one. Detail two. " && la.body.includes("Fine."), JSON.stringify(la));
+check("thinking: a refused wake lock doesn't break the reply", (await page.$$(".msg.error")).length === 0);
+let sent = await page.evaluate(() => window.__requests[window.__requests.length - 1]);
+check("thinking: reasoning never sent back to the API", !JSON.stringify(sent.messages).includes("Keep it short") && sent.messages.every(m => Object.keys(m).join() === "role,content"), JSON.stringify(sent.messages));
+
+// The token limit runs out while the model is still thinking: nothing is
+// lost, the reasoning is kept, and Retry replaces it.
+const longThought = "Plot. Characters. Setting. More plot. ";
+await page.evaluate((r) => window.__scenarios.push({ kind: "ok", reasoning: r, finishReason: "length" }), longThought);
+await page.fill("#composer", "a long story please");
+await page.click("#send-btn");
+await page.waitForSelector(".msg.error .retry-btn");
+la = await lastAssistant();
+check("think-only: reasoning kept, note shown", la.thinking === longThought && la.body.includes("No reply was written"), JSON.stringify(la));
+check("think-only: cause explained", (await page.textContent(".msg.error")).includes("token limit while still thinking") && la.meta.includes("interrupted: hit the output token limit while still thinking"), await page.textContent(".msg.error"));
+stored2 = (await curChat()).pop();
+check("think-only: stored as an interrupted reply", stored2.role === "assistant" && stored2.content === "" && stored2.reasoning === longThought && !!stored2.interrupted, JSON.stringify(stored2));
+await page.evaluate(() => window.__scenarios.push({ kind: "ok", text: "A short story." }));
+await page.click(".retry-btn");
+await doneStreaming();
+sent = await page.evaluate(() => window.__requests[window.__requests.length - 1]);
+const retriedChat = await curChat();
+check("think-only: retry replaces the kept reply", retriedChat.length === 6 && retriedChat[5].content === "A short story." && retriedChat[4].content === "a long story please" && (await page.$$(".msg.assistant")).length === 3, JSON.stringify(retriedChat.map(m => m.content)));
+check("think-only: retry sends no empty assistant turn", sent.messages[sent.messages.length - 1].content === "a long story please" && sent.messages.every(m => m.content), JSON.stringify(sent.messages));
+
+// The connection breaks mid-reply: what arrived is kept.
+await page.evaluate(() => window.__scenarios.push({ kind: "drop", reasoning: "Hmm. ", text: "It was a dark and stormy" }));
+await page.fill("#composer", "another");
+await page.click("#send-btn");
+await page.waitForSelector(".msg.error .retry-btn");
+la = await lastAssistant();
+check("drop: partial reply kept", la.body.includes("It was a dark and stormy") && la.thinking === "Hmm. " && la.meta.includes("interrupted: network error"), JSON.stringify(la));
+check("drop: error offers retry", (await page.textContent(".msg.error")).includes("cut off (network error)"), await page.textContent(".msg.error"));
+check("drop: partial is saved", (await curChat()).pop().content === "It was a dark and stormy");
+
+// The stream goes silent without closing: the watchdog gives up and keeps it.
+await page.evaluate(() => { window.__orcStreamIdleMs = 1200; window.__scenarios.push({ kind: "hang", text: "Half a story" }); });
+await page.fill("#composer", "and another");
+await page.click("#send-btn");
+await page.waitForFunction(() => (document.querySelector(".msg.error") || {}).textContent?.includes("went silent"), null, { timeout: 8000 });
+la = await lastAssistant();
+check("stall: partial kept when the stream goes silent", la.body.includes("Half a story") && la.meta.includes("went silent"), JSON.stringify(la));
+check("stall: streaming UI reset", !(await page.$eval("#send-btn", b => b.classList.contains("stop"))) && (await page.$$(".msg.assistant.streaming")).length === 0);
+await page.evaluate(() => window.__scenarios.push({ kind: "hang" }));
+await page.fill("#composer", "silent from the start");
+await page.click("#send-btn");
+await page.waitForFunction(() => (document.querySelector(".msg.error") || {}).textContent?.includes("No response for"), null, { timeout: 8000 });
+check("stall: nothing arrived, so no empty bubble kept", (await curChat()).pop().role === "user" && (await page.$$(".msg.assistant.streaming")).length === 0);
+await page.evaluate(() => { delete window.__orcStreamIdleMs; });
+
+// Stopping while it's thinking keeps the reasoning.
+await page.evaluate(() => window.__scenarios.push({ kind: "ok", reasoning: "one two three four five six seven eight nine ten ", text: "never", delayMs: 150 }));
+await page.fill("#composer", "think then stop");
+await page.click("#send-btn");
+await page.waitForFunction(() => (document.querySelector(".thinking.live .thinking-body") || {}).textContent?.length > 8);
+await page.click("#send-btn");
+await doneStreaming();
+la = await lastAssistant();
+check("stop while thinking keeps the reasoning", la.thinking.startsWith("one two") && !la.body.includes("never") && la.meta.includes("stopped"), JSON.stringify(la));
 
 check("no page errors", errors.length === 0, JSON.stringify(errors));
 console.log(JSON.stringify(results, null, 2));
