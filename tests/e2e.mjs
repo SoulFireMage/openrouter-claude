@@ -1648,6 +1648,57 @@ check("sync: and the first account is untouched", JSON.stringify(await remoteCha
 const everything = JSON.stringify(Object.values(await localChats()));
 check("sync: no chat was lost along the way", ["a2 offline A a", "a2 from B a", "a1 kept a", "lag local a", "lag remote a", "signed out a"].every(t => everything.includes(t)), everything.slice(0, 300));
 
+// ---------- Profiles sync ----------
+const remoteProfiles = async (userId) => ((await remoteDb()).records.find(r => r.user_id === userId && r.data.kind === "profiles") || { data: null }).data;
+const localProfiles = () => page.evaluate(() => JSON.parse(localStorage.getItem("orc_profiles") || "[]"));
+check("profiles: nothing is uploaded while there are no profiles", (await remoteProfiles("user-2")) === null);
+const mkProfile = (id, name, updated, extra = {}) => ({ id, name, model: "a/b", systemPrompt: "prompt of " + name, filters: {}, includes: { model: true, prompt: true, filters: false }, isDefault: false, created: 1, updated, ...extra });
+await page.evaluate((list) => localStorage.setItem("orc_profiles", JSON.stringify(list)), [mkProfile("p1", "Coder", 100, { isDefault: true }), mkProfile("p2", "Poet", 100)]);
+await page.reload({ waitUntil: "load" });
+await page.waitForFunction(() => JSON.parse(localStorage.getItem("__skapi_db")).records.some(r => r.data.kind === "profiles" && r.data.profiles.length === 2), null, { timeout: 15000 });
+await synced();
+let rp = await remoteProfiles("user-2");
+check("profiles: profiles are uploaded, in a private record of their own", rp.profiles.map(p => p.name).join() === "Coder,Poet" && rp.profiles[0].isDefault === true && (await remoteDb()).records.find(r => r.data.kind === "profiles").unique_id === "orc:user-2:~profiles" && (await cloudStatus()).includes("profiles brought up to date"), JSON.stringify(rp));
+check("profiles: the key is still not uploaded", !JSON.stringify(await remoteDb()).includes("sk-or-v1"));
+const profDevice1 = await takeDevice();
+
+// A second device receives them, default star included.
+await putDevice(dev({}));
+await signIn("richard@example.com", "secret-three");
+await synced();
+let lp = await localProfiles();
+check("profiles: a second device receives the profiles and the default", lp.map(p => p.name).sort().join() === "Coder,Poet" && lp.find(p => p.name === "Coder").isDefault === true && lp.find(p => p.name === "Poet").systemPrompt === "prompt of Poet", JSON.stringify(lp));
+check("profiles: they appear in the picker", (await page.$$eval("#profile-select option", os => os.map(o => o.textContent))).join("|") === "No profile|★ Coder|Poet");
+
+// Device 2 deletes one and edits the other; device 1 follows.
+await page.selectOption("#profile-select", "p2");
+await page.click("#profile-delete");
+await page.selectOption("#profile-select", "p1");
+await page.fill("#system-prompt", "edited on device two");
+await page.click("#profile-update");
+await page.click("#profile-save");
+await page.waitForFunction(() => { const r = JSON.parse(localStorage.getItem("__skapi_db")).records.find(r => r.data.kind === "profiles"); return r.data.profiles.length === 1 && r.data.profiles[0].systemPrompt === "edited on device two" && typeof r.data.gone.p2 === "number"; }, null, { timeout: 15000 });
+check("profiles: a delete and an edit are uploaded", true);
+// Meanwhile device 1 (not yet synced) adds a profile of its own.
+profDevice1.orc_profiles = JSON.stringify([...JSON.parse(profDevice1.orc_profiles), mkProfile("p3", "Analyst", Date.now())]);
+await putDevice(profDevice1);
+await page.waitForFunction(() => { const l = JSON.parse(localStorage.getItem("orc_profiles") || "[]"); return l.length === 2 && !l.some(p => p.id === "p2"); }, null, { timeout: 15000 });
+await page.waitForFunction(() => JSON.parse(localStorage.getItem("__skapi_db")).records.find(r => r.data.kind === "profiles").data.profiles.length === 2, null, { timeout: 15000 });
+lp = await localProfiles();
+rp = await remoteProfiles("user-2");
+check("profiles: the other device gets the edit and the delete, and keeps its own new profile", lp.find(p => p.id === "p1").systemPrompt === "edited on device two" && !lp.some(p => p.id === "p2") && lp.some(p => p.id === "p3"), JSON.stringify(lp.map(p => [p.id, p.systemPrompt])));
+check("profiles: the merged set is what the account holds", rp.profiles.map(p => p.id).sort().join() === "p1,p3" && typeof rp.gone.p2 === "number", JSON.stringify(rp));
+check("profiles: chats were not disturbed", Object.keys(await remoteChats("user-2")).filter(k => k !== "undefined").length > 3);
+
+// Import brings profiles to a fresh device (never the default star: a file can't change that).
+await putDevice(baseDevice);
+await page.click("#open-chats");
+await page.setInputFiles("#import-file", { name: "p.json", mimeType: "application/json", buffer: Buffer.from(JSON.stringify({ format: "openrouter-chat", version: 1, chats: [], profiles: [mkProfile("i1", "Imported one", 5, { isDefault: true }), mkProfile("i2", "Imported two", 5, { isDefault: true })] })) });
+await page.waitForFunction(() => /^Imported/.test(document.getElementById("transfer-status").textContent));
+lp = await localProfiles();
+check("profiles: import brings profiles to a fresh device", lp.length === 2 && lp.filter(p => p.isDefault).length === 0 && lp[1].systemPrompt === "prompt of Imported two" && (await page.textContent("#transfer-status")).includes("2 profiles"), JSON.stringify(lp.map(p => [p.name, p.isDefault])));
+await page.click("#chats-overlay", { position: { x: 380, y: 400 } });
+
 // The real library: vendored, loaded only when someone signs in, and
 // reported cleanly when it can't reach its server.
 const offline = await browser.newContext({ viewport: { width: 390, height: 780 } });

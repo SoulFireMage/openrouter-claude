@@ -16,8 +16,8 @@ just static files.
 - Accounts are optional. Signed out, nothing leaves the device except your
   requests to OpenRouter. Signed in (settings, "Account and sync"), your chats
   are also stored in a private [Skapi](https://www.skapi.com) table that only
-  your account can read, so they follow you between devices. The API key,
-  profiles and generated images are never uploaded.
+  your account can read, so they follow you between devices, along with
+  your profiles. The API key and generated images are never uploaded.
 - If `localStorage` isn't available for some reason (private browsing, a
   restrictive embedded browser, etc.), the app falls back to holding your key
   and history in memory for that session instead of breaking.
@@ -43,8 +43,9 @@ just static files.
   merged with the account's. Merging never discards text: if a chat was
   changed on two devices, both versions are kept. Deleting a chat deletes it
   on your other devices too. Signing out, an expired session or a failed sync
-  all leave every chat on the device. The Skapi library is only loaded once
-  you sign in.
+  all leave every chat on the device. Profiles sync too, default star
+  included: the most recently edited copy of each wins, and deleting one
+  deletes it everywhere. The Skapi library is only loaded once you sign in.
 - Export and import: the chats drawer writes every chat and profile to one
   JSON file (never the API key), with a Share button on phones that support
   it. The drawer's Export, Share and Import buttons stay on screen however
@@ -203,7 +204,7 @@ only when signing in). Licences are alongside the files.
 
 ## Ideas for later
 
-- Sync profiles and the system prompt as well as chats.
+- Optionally sync the OpenRouter key, encrypted with the account password.
 - Client-side encryption of synced chats (Skapi supports it, at the cost of a
   recovery code to look after).
 - Streamed previews for the image models that support them.

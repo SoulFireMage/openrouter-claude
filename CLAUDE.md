@@ -1,8 +1,10 @@
 # OpenRouter Chat: notes for Claude sessions
 
 A personal chat client for OpenRouter that runs entirely in the browser and is
-installed on an Android phone from GitHub Pages
-(https://soulfiremage.github.io/openrouter-claude/). The owner works from a
+installed on an Android phone from GitHub Pages, served on the owner's custom
+domain: https://starship-whisperer.com/openrouter-claude/. The old
+`soulfiremage.github.io` address redirects there, and browser storage is per
+address, so data saved under the old one does not follow. The owner works from a
 phone, so every change ships as a PR that is merged to `main`, which deploys.
 
 ## Architecture
@@ -40,7 +42,9 @@ phone, so every change ships as a PR that is merged to `main`, which deploys.
   `orc_chats` with unique id `orc:<user id>:<chat id>`; a deleted chat
   becomes a `{ deleted: true }` record. Sync pulls, merges, then pushes.
   The merge rules are listed at the top of that block: keep them
-  loss-free. The key, profiles and images are never uploaded.
+  loss-free. Profiles travel as one record (unique id ending `~profiles`,
+  `kind: "profiles"`): newest copy of each profile wins, deletes are listed
+  in `gone`. The key and images are never uploaded.
 
 ## Things that bite
 
@@ -68,6 +72,11 @@ phone, so every change ships as a PR that is merged to `main`, which deploys.
   record fails with "User has no access to update this record"; record data
   over 32 KB is stored as a file transparently; `$updated` works as an index
   on private tables. The fake in `tests/e2e.mjs` copies these.
+- A service worker cannot update through a redirect. A browser that
+  installed the app from the old github.io address stays on that old copy
+  until its site data is cleared; nothing deployed can reach it.
+- Import never sets a default profile (a file must not change behaviour of
+  new chats); only sync carries the default star.
 - Artificial Analysis ids do not map to OpenRouter ids. Models are joined by
   creator alias plus name tokens (`joinAA` and helpers). Keep matching
   conservative: a wrong intelligence score is worse than a missing one.
@@ -79,7 +88,8 @@ phone, so every change ships as a PR that is merged to `main`, which deploys.
 `orc_profiles`, `orc_active_profile`, `orc_image_models` (cached image
 catalogue), `orc_image_opts` (per-model image options), `orc_cloud_user`
 (`{ id, email, expired? }` while signed in) and `orc_cloud_state` (sync
-bookkeeping: cursor, per-chat synced stamps, pending deletes). Legacy keys cleaned up on load:
+bookkeeping: cursor, per-chat synced stamps, pending deletes, last synced
+profiles and deleted profile ids). Legacy keys cleaned up on load:
 `orc_history` (migrated into a chat) and `orc_aa_key`, `orc_aa_cache`,
 `orc_aa_attempt` (from the abandoned per-device Artificial Analysis key).
 

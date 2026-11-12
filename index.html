@@ -1183,7 +1183,7 @@
         </div>
       </div>
       <div class="hint" id="cloud-status" role="status"></div>
-      <div class="hint">Without an account everything stays on this device, exactly as before. With one, your chats are also kept in a private store that only you can read, and are merged across your devices. Chats already on this device are uploaded when you first sign in and merged with the account's, never overwritten. Your OpenRouter key, profiles and generated images never leave this device.</div>
+      <div class="hint">Without an account everything stays on this device, exactly as before. With one, your chats are also kept in a private store that only you can read, and are merged across your devices. Chats already on this device are uploaded when you first sign in and merged with the account's, never overwritten. Profiles sync too. Your OpenRouter key and generated images never leave this device.</div>
     </div>
 
     <div class="warning">
@@ -1888,7 +1888,7 @@
         return { id: c.id, title: c.title, created: c.created, updated: c.updated, model: c.model, messages: messages };
       }),
       profiles: chatId ? [] : profiles.map(function (p) {
-        return { id: p.id, name: p.name, model: p.model, systemPrompt: p.systemPrompt, filters: p.filters, includes: p.includes, created: p.created, updated: p.updated };
+        return { id: p.id, name: p.name, model: p.model, systemPrompt: p.systemPrompt, filters: p.filters, includes: p.includes, isDefault: !!p.isDefault, created: p.created, updated: p.updated };
       })
     };
   }
@@ -2216,6 +2216,7 @@
   function persistProfiles() {
     storageSet(KEYS.profiles, JSON.stringify(profiles));
     if (activeProfileId) storageSet(KEYS.activeProfile, activeProfileId); else storageRemove(KEYS.activeProfile);
+    cloudTouch();
   }
 
   function modelDisplayName(id) {
@@ -2370,6 +2371,7 @@
     if (!confirm("Delete profile \"" + p.name + "\"? Your current settings stay as they are.")) return;
     profiles = profiles.filter(function (q) { return q.id !== p.id; });
     activeProfileId = null;
+    cloudNoteProfileDeleted(p.id);
     persistProfiles();
     updateModelLabel(chosenModel);
     renderProfileControls();
@@ -2379,8 +2381,11 @@
     var p = activeProfileId && profileById(activeProfileId);
     if (!p) return;
     var makeDefault = !p.isDefault;
-    profiles.forEach(function (q) { q.isDefault = false; });
-    p.isDefault = makeDefault;
+    // Stamp whatever changes, so the newest choice of default wins when syncing.
+    profiles.forEach(function (q) {
+      var next = q === p ? makeDefault : false;
+      if (!!q.isDefault !== next) { q.isDefault = next; q.updated = Date.now(); }
+    });
     persistProfiles();
     renderProfileControls();
   }
@@ -4281,6 +4286,9 @@
     status: document.getElementById("cloud-status")
   };
 
+  // What "no profiles, none deleted" looks like to cloudProfilesKey().
+  var NO_PROFILES = "[[],{}]";
+
   var skapiPromise = null;
   var cloudUser = readJson(KEYS.cloudUser, null);   // { id, email, expired? } while signed in on this device
   if (!cloudUser || typeof cloudUser !== "object" || typeof cloudUser.id !== "string") cloudUser = null;
@@ -4303,7 +4311,7 @@
   }
 
   function freshCloudState(userId) {
-    return { user: userId || "", cursor: 0, synced: {}, deleted: {} };
+    return { user: userId || "", cursor: 0, synced: {}, deleted: {}, profiles: NO_PROFILES, goneProfiles: {} };
   }
 
   function readCloudState() {
@@ -4312,6 +4320,8 @@
     if (typeof st.cursor !== "number") st.cursor = 0;
     if (!st.synced || typeof st.synced !== "object") st.synced = {};
     if (!st.deleted || typeof st.deleted !== "object") st.deleted = {};
+    if (typeof st.profiles !== "string") st.profiles = NO_PROFILES;
+    if (!st.goneProfiles || typeof st.goneProfiles !== "object") st.goneProfiles = {};
     return st;
   }
 
@@ -4442,6 +4452,90 @@
     return "copied";
   }
 
+  /* ----- Profiles -----
+     All profiles travel as one small record (unique id ending "~profiles")
+     in the same private table. Per profile the most recently updated copy
+     wins, and "gone" lists deleted ids with the time of deletion so a delete
+     reaches other devices; a profile edited after that time survives. */
+  function cloudProfilesPayload() {
+    return {
+      v: 1,
+      kind: "profiles",
+      profiles: profiles.map(function (p) {
+        return { id: p.id, name: p.name, model: p.model || "", systemPrompt: p.systemPrompt || "", filters: p.filters || {},
+          includes: p.includes, isDefault: !!p.isDefault, created: p.created || 0, updated: p.updated || 0 };
+      }),
+      gone: cloudState.goneProfiles
+    };
+  }
+
+  function cloudProfilesKey() {
+    var payload = cloudProfilesPayload();
+    return JSON.stringify([payload.profiles, payload.gone]);
+  }
+
+  function cloudNoteProfileDeleted(id) {
+    cloudState.goneProfiles[id] = Date.now();
+    saveCloudState();
+  }
+
+  function cloudMergeProfiles(d) {
+    if (!d || typeof d !== "object" || !Array.isArray(d.profiles)) return;
+    var gone = cloudState.goneProfiles;
+    if (d.gone && typeof d.gone === "object") {
+      Object.keys(d.gone).forEach(function (id) {
+        if (typeof d.gone[id] === "number" && !(gone[id] >= d.gone[id])) gone[id] = d.gone[id];
+      });
+    }
+    d.profiles.forEach(function (r) {
+      if (!r || typeof r !== "object" || typeof r.id !== "string" || typeof r.name !== "string" || !r.name.trim()) return;
+      var stamp = typeof r.updated === "number" ? r.updated : 0;
+      var mine = profileById(r.id);
+      if (mine && (mine.updated || 0) >= stamp) return;
+      var copy = normaliseProfile({
+        id: r.id,
+        name: r.name.replace(/\s+/g, " ").trim().slice(0, 40),
+        model: typeof r.model === "string" ? r.model : "",
+        systemPrompt: typeof r.systemPrompt === "string" ? r.systemPrompt : "",
+        filters: r.filters && typeof r.filters === "object" ? r.filters : {},
+        includes: r.includes && typeof r.includes === "object" ? r.includes : undefined,
+        isDefault: r.isDefault === true,
+        created: typeof r.created === "number" ? r.created : stamp,
+        updated: stamp
+      });
+      if (mine) profiles[profiles.indexOf(mine)] = copy; else profiles.push(copy);
+    });
+    profiles = profiles.filter(function (p) { return !(gone[p.id] >= (p.updated || 0)); });
+    profiles.forEach(function (p) { delete gone[p.id]; });
+    // Two devices may each have starred a default: the latest choice stands.
+    profiles.filter(function (p) { return p.isDefault; })
+      .sort(function (a, b) { return (b.updated || 0) - (a.updated || 0); })
+      .slice(1).forEach(function (p) { p.isDefault = false; });
+    if (activeProfileId && !profileById(activeProfileId)) activeProfileId = null;
+    storageSet(KEYS.profiles, JSON.stringify(profiles));
+    if (activeProfileId) storageSet(KEYS.activeProfile, activeProfileId); else storageRemove(KEYS.activeProfile);
+    updateModelLabel(chosenModel);
+    renderProfileControls();
+  }
+
+  // Reads the account's copy first, so a change another device made a
+  // moment ago is merged in rather than overwritten.
+  async function cloudPushProfiles(sk, userId) {
+    var uid = cloudUid(userId, "~profiles");
+    var exists = true;
+    try {
+      var got = await sk.getRecords({ unique_id: uid });
+      var rec = got && Array.isArray(got.list) ? got.list[0] : null;
+      if (rec) cloudMergeProfiles(rec.data); else exists = false;
+    } catch (e) {
+      if (!/not exist/i.test(errText(e))) throw e;
+      exists = false;
+    }
+    var key = cloudProfilesKey();
+    await sk.postRecord(cloudProfilesPayload(), exists ? { record_id: uid } : { unique_id: uid, table: CLOUD_TABLE });
+    cloudState.profiles = key;
+  }
+
   /* ----- Talking to Skapi ----- */
   async function cloudList(sk, since) {
     var query = { table: CLOUD_TABLE };
@@ -4532,7 +4626,7 @@
     cloudRerender = false;
     var userId = cloudUser.id;
     var still = function () { return cloudActive() && cloudUser.id === userId; };
-    var tally = { pulled: 0, pushed: 0, copied: 0, removed: 0, full: 0, failed: 0, error: "" };
+    var tally = { pulled: 0, pushed: 0, copied: 0, removed: 0, full: 0, failed: 0, error: "", profiles: false };
     var sk = null;
     setCloudNote("Syncing…");
     try {
@@ -4544,6 +4638,13 @@
       var hold = false;
       var seen = {};
       list.forEach(function (rec) {
+        if (rec && rec.data && rec.data.kind === "profiles") {
+          var before = cloudProfilesKey();
+          cloudMergeProfiles(rec.data);
+          // In step with the account unless this device had changes of its own.
+          if (cloudProfilesKey() !== before) tally.profiles = true;
+          if (cloudState.profiles === before) cloudState.profiles = cloudProfilesKey();
+        }
         var out = cloudApply(rec);
         if (rec && rec.data && typeof rec.data.id === "string") seen[rec.data.id] = true;
         if (hasOwn(tally, out)) tally[out]++;
@@ -4570,6 +4671,15 @@
           tally.error = errText(e);
         }
       }
+      if (still() && cloudProfilesKey() !== cloudState.profiles) {
+        try {
+          await cloudPushProfiles(sk, userId);
+          tally.profiles = true;
+        } catch (e) {
+          tally.failed++;
+          tally.error = errText(e);
+        }
+      }
       var gone = Object.keys(cloudState.deleted);
       for (var j = 0; j < gone.length; j++) {
         if (!still()) return;
@@ -4588,6 +4698,7 @@
       if (tally.pulled) bits.push(plural(tally.pulled, "chat") + " downloaded");
       if (tally.pushed) bits.push(plural(tally.pushed, "chat") + " uploaded");
       if (tally.copied) bits.push(plural(tally.copied, "chat") + " changed in two places, so both versions were kept");
+      if (tally.profiles) bits.push("profiles brought up to date");
       if (tally.removed) bits.push(plural(tally.removed, "chat") + " deleted on another device removed here");
       var note = "Synced at " + formatWhen(cloudLastSync) + (bits.length ? ": " + bits.join(", ") : "") + ".";
       if (tally.full) note += " This device's storage is full, so " + plural(tally.full, "chat") + " from your account couldn't be saved here.";
