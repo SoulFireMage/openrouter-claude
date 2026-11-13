@@ -72,6 +72,15 @@ phone, so every change ships as a PR that is merged to `main`, which deploys.
   record fails with "User has no access to update this record"; record data
   over 32 KB is stored as a file transparently; `$updated` works as an index
   on private tables. The fake in `tests/e2e.mjs` copies these.
+- An interrupted reply can be continued or regenerated (`redoLast`). The
+  cut-off reply is taken off `history` in memory only and stays in storage
+  until its replacement is filed, so it must be put back on every path
+  that files nothing (`restorePrior`). The continue note is API input
+  only: never store or show it.
+- A regenerated assistant entry carries `versions` (snapshots, the shown
+  one included) and `v` (index shown). Its ordinary fields always mirror
+  `versions[v]`, so the API, export, share and sync only ever see the
+  shown version's text.
 - A service worker cannot update through a redirect. A browser that
   installed the app from the old github.io address stays on that old copy
   until its site data is cleared; nothing deployed can reach it.
