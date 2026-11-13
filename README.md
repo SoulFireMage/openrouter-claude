@@ -51,6 +51,9 @@ just static files.
   all leave every chat on the device. Profiles sync too, default star
   included: the most recently edited copy of each wins, and deleting one
   deletes it everywhere. The Skapi library is only loaded once you sign in.
+- The build number is shown at the bottom of settings, with **Check for an
+  update**, which fetches a newer build straight away instead of waiting for
+  the next launch.
 - Optional encrypted key sync. Tick "Also sync my OpenRouter key, encrypted
   with my password" (off by default) and a new device gets the key just by
   signing in. The key is encrypted in the browser (PBKDF2-SHA256 with

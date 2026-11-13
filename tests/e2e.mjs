@@ -196,6 +196,14 @@ const fakeFetch = () => {
 // and response shapes copy what the real service returned when probed.
 const fakeSkapi = () => {
   if (!localStorage.getItem("__skapiFake")) return;
+  // "__quotaKey": that localStorage key refuses writes, as when storage is full.
+  if (localStorage.getItem("__quotaKey")) {
+    const realSet = Storage.prototype.setItem;
+    Storage.prototype.setItem = function (k, v) {
+      if (k === localStorage.getItem("__quotaKey")) throw new DOMException("Quota exceeded", "QuotaExceededError");
+      return realSet.call(this, k, v);
+    };
+  }
   const load = () => JSON.parse(localStorage.getItem("__skapi_db") || '{"users":{},"session":null,"records":[],"clock":0}');
   const save = (db) => localStorage.setItem("__skapi_db", JSON.stringify(db));
   const err = (code, message) => Object.assign(new Error(message), { code });
@@ -1390,6 +1398,14 @@ check("continue: a failed attempt leaves the partial reply untouched", (await la
 await page.reload({ waitUntil: "load" });
 check("continue: and it is still there after a reload", (await lastMsg()).content === "first part, second part, " && (await page.textContent("#messages")).includes("first part, second part,"));
 
+// Copilot on #27: with the key gone, Continue must not take the reply away.
+await page.evaluate(() => localStorage.removeItem("orc_api_key"));
+await redoBtn("Continue");
+await page.waitForTimeout(200);
+check("continue: without a key the cut-off reply stays put", (await lastMsg()).content === "first part, second part, " && (await page.textContent("#messages")).includes("first part, second part,") && (await page.$$(".msg.error .retry-btn")).length === 2, await page.textContent("#messages"));
+await page.evaluate(() => localStorage.setItem("orc_api_key", "sk-or-v1-test"));
+await page.reload({ waitUntil: "load" });
+
 // Regenerate: a fresh reply, with the cut-off one kept as an earlier version.
 const beforeRegen = (await curChat()).length;
 await page.evaluate(() => { window.__requests = []; window.__scenarios.push({ kind: "ok", text: "the whole answer" }); });
@@ -1841,6 +1857,147 @@ check("key: an older session is asked to sign in again before it can be turned o
 await page.click("#cloud-sign-out");
 await page.waitForFunction(() => /^Signed out/.test(document.getElementById("cloud-status").textContent));
 check("key: signing out forgets the derived key", (await page.evaluate(() => localStorage.getItem("orc_cloud_kek"))) === null);
+
+// ---------- Copilot follow-ups on #25 to #28 ----------
+// Re-enabling key sync after it was turned off must stick (#28).
+await putDevice(baseDevice);
+await signIn("richard@example.com", "secret-four");
+await synced();
+await page.check("#cloud-key-sync");
+await waitKey("d && typeof d.ct === 'string' && !d.removed");
+await synced();
+await page.reload({ waitUntil: "load" });
+await synced();
+await openSettings();
+check("key: turning it back on after turning it off sticks", await page.$eval("#cloud-key-sync", e => e.checked) && typeof (await keyRecord()).ct === "string" && !(await keyRecord()).removed, JSON.stringify(await keyRecord()));
+
+// A password reset on a device that already synced its key: the account's
+// copy is replaced with one the new password can read (#28).
+const oldCt = (await keyRecord()).ct;
+await page.click("#cloud-sign-out");
+await page.waitForFunction(() => /^Signed out/.test(document.getElementById("cloud-status").textContent));
+await page.evaluate(() => { const db = JSON.parse(localStorage.getItem("__skapi_db")); db.users["richard@example.com"].password = "secret-five"; localStorage.setItem("__skapi_db", JSON.stringify(db)); });
+await signIn("richard@example.com", "secret-five");
+await waitKey("d && d.ct !== " + JSON.stringify(oldCt));
+await synced();
+await putDevice({ orc_model: "anthropic/claude-sonnet-4" });
+await signIn("richard@example.com", "secret-five");
+await synced();
+check("key: after a password reset the device that has the key re-encrypts it", (await localKey()) === "sk-or-v1-test");
+
+// A session with no derived key is told how to receive the account's key.
+await page.evaluate(() => { localStorage.removeItem("orc_cloud_kek"); localStorage.removeItem("orc_api_key"); });
+await page.reload({ waitUntil: "load" });
+await synced();
+await syncNow();
+check("key: an older session is told to sign in again to receive the key", (await localKey()) === null && (await cloudStatus()).includes("sign out and sign in again"), await cloudStatus());
+await page.click("#cloud-sign-out");
+await page.waitForFunction(() => /^Signed out/.test(document.getElementById("cloud-status").textContent));
+
+// Two devices upload over each other between syncs (#25): the one whose
+// upload was overwritten keeps its version as a copy instead of losing it.
+await putDevice(dev({ r1: { messages: qa("r1 q", "r1 a"), updated: 1000 } }));
+await signIn("race@example.com", "secret-race", true);
+await synced();
+const raceA = await takeDevice();
+await putDevice(dev({}));
+await signIn("race@example.com", "secret-race");
+await synced();
+await page.click("#save-settings");
+await page.click("#open-chats");
+await page.click('.chat-row:has(.chat-title:text-is("r1")) .chat-open');
+await page.evaluate(() => window.__scenarios.push({ kind: "ok", text: "r1 from B a" }));
+await send("r1 from B q");
+await page.waitForFunction(() => JSON.parse(localStorage.getItem("__skapi_db")).records.find(r => r.data.id === "r1").data.messages.length === 4, null, { timeout: 15000 });
+await synced();
+const raceB = await takeDevice();
+// Device A has its own new reply and, because of index lag, does not see B's upload.
+raceA.orc_chat_r1 = JSON.stringify(qa("r1 q", "r1 a", "r1 from A q", "r1 from A a"));
+raceA.orc_chats = JSON.stringify(JSON.parse(raceA.orc_chats).map(c => c.id === "r1" ? { ...c, updated: Date.now(), count: 4 } : c));
+await page.evaluate(() => localStorage.setItem("__skapiLag", "r1"));
+await putDevice(raceA);
+await page.waitForFunction(() => JSON.parse(localStorage.getItem("__skapi_db")).records.find(r => r.data.id === "r1").data.messages[2].content === "r1 from A q", null, { timeout: 15000 });
+await page.evaluate(() => localStorage.removeItem("__skapiLag"));
+check("race: setup - device A's upload replaced device B's in the account", texts((await remoteChats("user-3")).r1) === "r1 q|r1 a|r1 from A q|r1 from A a");
+await putDevice(raceB);
+await page.waitForFunction(() => JSON.parse(localStorage.getItem("orc_chats")).length === 2, null, { timeout: 15000 });
+local = await localChats();
+const raceCopy = Object.values(local).find(c => c.title.endsWith("(this device's copy)"));
+check("race: the overwritten device keeps its version as a copy", texts(local.r1) === "r1 q|r1 a|r1 from A q|r1 from A a" && !!raceCopy && texts(raceCopy) === "r1 q|r1 a|r1 from B q|r1 from B a", JSON.stringify(Object.values(local).map(c => c.title + ": " + texts(c))));
+await page.waitForFunction(() => JSON.parse(localStorage.getItem("__skapi_db")).records.some(r => r.user_id === "user-3" && r.data.title === "r1 (this device's copy)"), null, { timeout: 15000 });
+check("race: and the copy reaches the account", true);
+await synced();
+// The ordinary case still simply updates: A continues, B (unchanged) follows without a copy.
+const raceB2 = await takeDevice();
+await putDevice(raceA);
+await page.waitForFunction(() => JSON.parse(localStorage.getItem("orc_chats")).length === 2, null, { timeout: 15000 });
+await synced();
+await page.click("#open-chats");
+await page.click('.chat-row:has(.chat-title:text-is("r1")) .chat-open');
+await page.evaluate(() => window.__scenarios.push({ kind: "ok", text: "r1 A again a" }));
+await send("r1 A again q");
+await page.waitForFunction(() => JSON.parse(localStorage.getItem("__skapi_db")).records.find(r => r.data.id === "r1").data.messages.length === 6, null, { timeout: 15000 });
+await synced();
+await putDevice(raceB2);
+await page.waitForFunction(() => JSON.parse(localStorage.getItem("orc_chat_r1")).length === 6, null, { timeout: 15000 });
+await synced();
+check("race: a normal update from another device still just updates", Object.keys(await localChats()).length === 2 && texts((await localChats()).r1).endsWith("r1 A again q|r1 A again a"), JSON.stringify(Object.keys(await localChats())));
+
+// No room to store a longer account copy: it must not be overwritten by the shorter local one (#25).
+await page.evaluate(() => {
+  const db = JSON.parse(localStorage.getItem("__skapi_db"));
+  db.clock = Math.max(Date.now(), db.clock + 1);
+  db.records.push({ record_id: "full1", unique_id: "orc:user-3:f1", user_id: "user-3", table: { name: "orc_chats", access_group: "private" },
+    data: { v: 1, id: "f1", title: "f1", created: 1, updated: 1, model: "", messages: [{ role: "user", content: "f1 q" }, { role: "assistant", content: "f1 a" }, { role: "user", content: "f1 more q" }, { role: "assistant", content: "f1 more a" }] }, updated: db.clock, uploaded: db.clock });
+  localStorage.setItem("__skapi_db", JSON.stringify(db));
+  const index = JSON.parse(localStorage.getItem("orc_chats"));
+  index.push({ id: "f1", title: "f1", created: 5, updated: 5, model: "", count: 2 });
+  localStorage.setItem("orc_chats", JSON.stringify(index));
+  localStorage.setItem("orc_chat_f1", JSON.stringify([{ role: "user", content: "f1 q" }, { role: "assistant", content: "f1 a" }]));
+  localStorage.setItem("__quotaKey", "orc_chat_f1");
+});
+await page.reload({ waitUntil: "load" });
+await page.waitForFunction(() => /storage is full/.test(document.getElementById("cloud-status").textContent), null, { timeout: 15000 });
+await page.waitForTimeout(3600);
+check("full: a longer account copy that can't be stored here is not overwritten", texts((await remoteChats("user-3")).f1) === "f1 q|f1 a|f1 more q|f1 more a" && texts((await localChats()).f1) === "f1 q|f1 a", texts((await remoteChats("user-3")).f1));
+await page.evaluate(() => localStorage.removeItem("__quotaKey"));
+await page.reload({ waitUntil: "load" });
+await page.waitForFunction(() => JSON.parse(localStorage.getItem("orc_chat_f1")).length === 4, null, { timeout: 15000 });
+check("full: once there is room it arrives", texts((await localChats()).f1) === "f1 q|f1 a|f1 more q|f1 more a");
+await synced();
+
+// The default star follows the latest choice, not the latest edit (#26).
+await page.evaluate((list) => {
+  const db = JSON.parse(localStorage.getItem("__skapi_db"));
+  db.clock = Math.max(Date.now(), db.clock + 1);
+  db.records.push({ record_id: "prof3", unique_id: "orc:user-3:~profiles", user_id: "user-3", table: { name: "orc_chats", access_group: "private" },
+    data: { v: 1, kind: "profiles", profiles: list.remote, gone: {} }, updated: db.clock, uploaded: db.clock });
+  localStorage.setItem("__skapi_db", JSON.stringify(db));
+  localStorage.setItem("orc_profiles", JSON.stringify(list.local));
+}, {
+  // Elsewhere, at time 900: P2 was starred, which unstarred P1.
+  remote: [mkProfile("s1", "Star one", 100, { isDefault: false, starAt: 900 }), mkProfile("s2", "Star two", 100, { isDefault: true, starAt: 900 })],
+  // Here, at time 1000: P1 (still starred here, from time 100) had its prompt edited.
+  local: [mkProfile("s1", "Star one", 1000, { isDefault: true, starAt: 100, systemPrompt: "edited here later" }), mkProfile("s2", "Star two", 100)]
+});
+await page.reload({ waitUntil: "load" });
+await page.waitForFunction(() => { const r = JSON.parse(localStorage.getItem("__skapi_db")).records.find(r => r.user_id === "user-3" && r.data.kind === "profiles"); return r.data.profiles.some(p => p.systemPrompt === "edited here later"); }, null, { timeout: 15000 });
+lp = await localProfiles();
+check("profiles: the latest choice of default wins over a later edit", lp.find(p => p.id === "s2").isDefault === true && lp.find(p => p.id === "s1").isDefault === false && lp.find(p => p.id === "s1").systemPrompt === "edited here later", JSON.stringify(lp.map(p => [p.id, p.isDefault, p.systemPrompt])));
+await synced();
+await openSettings();
+await page.click("#cloud-sign-out");
+await page.waitForFunction(() => /^Signed out/.test(document.getElementById("cloud-status").textContent));
+
+// ---------- Version ----------
+const swText = await page.evaluate(() => fetch("sw.js", { cache: "no-store" }).then(r => r.text()));
+const swVersion = /orc-shell-v(\d+)/.exec(swText)[1];
+await openSettings();
+check("version: the build number is shown and matches the service worker cache", (await page.textContent("#version-text")) === "Version " + swVersion, await page.textContent("#version-text"));
+await page.click("#version-check");
+await page.waitForFunction(() => /latest/.test(document.getElementById("version-text").textContent));
+check("version: checking for an update reports when this is the latest", (await page.textContent("#version-text")) === "Version " + swVersion + ". This is the latest.");
+await page.click("#save-settings");
 
 // The real library: vendored, loaded only when someone signs in, and
 // reported cleanly when it can't reach its server.

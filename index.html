@@ -982,6 +982,9 @@
   #settings-panel #cloud-key-row input { width: auto; margin: 2px 0 0; padding: 0; flex: none; }
   #settings-panel #cloud-key-row[hidden] { display: none; }
 
+  #version-note { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; margin-top: 10px; padding-top: 10px; }
+  #version-note .link-btn { margin-top: 0; font-size: 11px; }
+
   .storage-note {
     font-size: 11px;
     color: var(--text-muted);
@@ -1216,6 +1219,10 @@
     </div>
 
     <div class="storage-note" id="storage-status">Checking storage…</div>
+    <div class="storage-note" id="version-note">
+      <span id="version-text"></span>
+      <button type="button" class="link-btn" id="version-check">Check for an update</button>
+    </div>
   </div>
 </div>
 
@@ -1227,6 +1234,9 @@
   "use strict";
 
   var OPENROUTER = "https://openrouter.ai/api/v1";
+  // Shown in settings so it is plain which build a device is running. Keep
+  // it equal to the number in sw.js's CACHE_NAME (a test checks this).
+  var APP_VERSION = 27;
   var APP_TITLE = "OpenRouter Chat";
 
   /* ---------------- Storage: localStorage with in-memory fallback ---------------- */
@@ -1773,6 +1783,9 @@
     if (isStreaming) return;
     var last = history[history.length - 1];
     if (!last || last.role !== "assistant" || !last.interrupted) return;
+    // Without a key or model nothing can be sent, and the reply must not be
+    // taken off for a request that never starts.
+    if (!storageGet(KEYS.apiKey) || !storageGet(KEYS.model)) { updateComposerEnabled(); return; }
     history.pop();
     renderHistory();
     sendMessage(true, { mode: mode, prior: last });
@@ -2457,10 +2470,11 @@
     var p = activeProfileId && profileById(activeProfileId);
     if (!p) return;
     var makeDefault = !p.isDefault;
-    // Stamp whatever changes, so the newest choice of default wins when syncing.
+    // The star is stamped separately from edits (starAt), so when syncing
+    // the newest choice of default wins whatever else was edited since.
     profiles.forEach(function (q) {
       var next = q === p ? makeDefault : false;
-      if (!!q.isDefault !== next) { q.isDefault = next; q.updated = Date.now(); }
+      if (!!q.isDefault !== next) { q.isDefault = next; q.starAt = Date.now(); }
     });
     persistProfiles();
     renderProfileControls();
@@ -3037,8 +3051,25 @@
     });
   }
 
+  // Image ids that chats other than chatId still show. A copy made when a
+  // chat was changed in two places shares its pictures with the original.
+  function imagesUsedElsewhere(chatId) {
+    var used = {};
+    chats.forEach(function (c) {
+      if (c.id === chatId) return;
+      (c.id === currentChatId ? history : loadChat(c.id)).forEach(function (m) {
+        var lists = [m.images].concat(Array.isArray(m.versions) ? m.versions.map(function (v) { return v && v.images; }) : []);
+        lists.forEach(function (list) {
+          if (Array.isArray(list)) list.forEach(function (ref) { if (ref && ref.id) used[ref.id] = true; });
+        });
+      });
+    });
+    return used;
+  }
+
   async function imageDeleteChat(chatId) {
-    Object.keys(memImages).forEach(function (k) { if (memImages[k].chatId === chatId) delete memImages[k]; });
+    var keep = imagesUsedElsewhere(chatId);
+    Object.keys(memImages).forEach(function (k) { if (memImages[k].chatId === chatId && !keep[k]) delete memImages[k]; });
     var db = await imgDb();
     if (!db) return;
     try {
@@ -3046,7 +3077,9 @@
       var cursorReq = tx.objectStore(IMG_STORE).index("chatId").openCursor(IDBKeyRange.only(chatId));
       cursorReq.onsuccess = function () {
         var cur = cursorReq.result;
-        if (cur) { cur.delete(); cur.continue(); }
+        if (!cur) return;
+        if (!keep[cur.value && cur.value.id]) cur.delete();
+        cur.continue();
       };
     } catch (e) { /* nothing more to do */ }
   }
@@ -3217,7 +3250,10 @@
   /* ----- Generating ----- */
   // Files a finished reply into the chat it was requested from, even if the
   // user has since switched to another chat.
-  function fileReply(entry, sendChatId, placeholderEl) {
+  // replaceTail: the chat's stored last entry is a cut-off reply that this
+  // one supersedes. It is swapped in the same write, so a failed write
+  // leaves the stored chat exactly as it was.
+  function fileReply(entry, sendChatId, placeholderEl, replaceTail) {
     if (currentChatId === sendChatId) {
       if (placeholderEl) placeholderEl.remove();
       history.push(entry);
@@ -3229,8 +3265,10 @@
       var meta = chatMeta(sendChatId);
       if (!meta) return;
       var other = loadChat(sendChatId);
+      var tail = other[other.length - 1];
+      if (replaceTail && tail && tail.role === "assistant" && tail.interrupted) other.pop();
       other.push(entry);
-      saveChat(sendChatId, other);
+      if (!saveChat(sendChatId, other)) return;
       meta.updated = Date.now();
       meta.count = other.length;
       meta.model = entry.model || meta.model;
@@ -3616,15 +3654,10 @@
           at = versions.length - 1;
         }
         if (versions.length > 1) { entry.versions = versions; entry.v = at; }
-        // If the user has moved to another chat, the cut-off reply is still
-        // the last thing stored in this one: take it out before filing.
-        if (currentChatId !== sendChatId) {
-          var stored = loadChat(sendChatId);
-          var tail = stored[stored.length - 1];
-          if (tail && tail.role === "assistant" && tail.interrupted) { stored.pop(); saveChat(sendChatId, stored); }
-        }
       }
-      fileReply(entry, sendChatId, assistantEl);
+      // If the user has moved to another chat, the cut-off reply is still
+      // the last thing stored in this one; fileReply swaps it out.
+      fileReply(entry, sendChatId, assistantEl, !!redo);
     }
 
     function reply(extra) {
@@ -4432,7 +4465,8 @@
 
   function freshCloudState(userId) {
     return { user: userId || "", cursor: 0, synced: {}, deleted: {}, profiles: NO_PROFILES, goneProfiles: {},
-      keySync: false, keyPrint: "", keyRemove: false, keyDeclined: false };
+      keySync: false, keyPrint: "", keyRemove: false, keyDeclined: false, keyOptAt: 0,
+      dev: newId(), vv: {} };
   }
 
   function readCloudState() {
@@ -4447,6 +4481,9 @@
     st.keyRemove = st.keyRemove === true;
     st.keyDeclined = st.keyDeclined === true;
     if (typeof st.keyPrint !== "string") st.keyPrint = "";
+    if (typeof st.keyOptAt !== "number") st.keyOptAt = 0;
+    if (typeof st.dev !== "string" || !st.dev) st.dev = newId();
+    if (!st.vv || typeof st.vv !== "object") st.vv = {};
     return st;
   }
 
@@ -4499,9 +4536,40 @@
     return id === currentChatId ? cleanMessages(history) : loadChat(id);
   }
 
+  /* Skapi has no "write only if unchanged", so two devices can each upload
+     over the other. To notice afterwards, every upload carries a version
+     vector (vv): per device, how many times that device has uploaded this
+     chat. If the account's copy shows fewer uploads from this device than
+     this device has made, whoever wrote it had not seen this device's last
+     upload, and the two are merged as a conflict instead of one silently
+     replacing the other. */
+  function cloudSawMine(d) {
+    if (!d.vv || typeof d.vv !== "object") return true;   // written by a version without vectors
+    var mine = (cloudState.vv[d.id] && cloudState.vv[d.id][cloudState.dev]) || 0;
+    return (Number(d.vv[cloudState.dev]) || 0) >= mine;
+  }
+
+  function cloudNoteSeen(d) {
+    if (!d.vv || typeof d.vv !== "object") return;
+    var known = cloudState.vv[d.id] || (cloudState.vv[d.id] = {});
+    Object.keys(d.vv).forEach(function (dev) {
+      var n = Number(d.vv[dev]) || 0;
+      if (n > (known[dev] || 0)) known[dev] = n;
+    });
+  }
+
+  // Earlier versions kept on replies are part of a chat too.
+  function sameVersions(a, b) {
+    for (var i = 0; i < a.length; i++) {
+      if (JSON.stringify(a[i].versions || null) !== JSON.stringify(b[i].versions || null)) return false;
+    }
+    return true;
+  }
+
   // Writes the account's copy of a chat onto this device. False if storage is full.
   function cloudStore(d, messages) {
     if (!saveChat(d.id, messages)) return false;
+    cloudNoteSeen(d);
     var meta = chatMeta(d.id);
     if (!meta) {
       meta = { id: d.id, created: typeof d.created === "number" ? d.created : Date.now() };
@@ -4537,6 +4605,7 @@
       imageDeleteChat(id);
       chats = chats.filter(function (c) { return c.id !== id; });
       delete cloudState.synced[id];
+      delete cloudState.vv[id];
       if (id === currentChatId) {
         currentChatId = null;
         history = [];
@@ -4553,27 +4622,46 @@
       return cloudStore(d, remote) ? "pulled" : "full";
     }
     var local = localMessages(id);
+    var dirty = cloudDirty(meta);
     if (sameMessages(local, remote)) {
-      cloudState.synced[id] = meta.updated;
-      return "same";
+      if (sameVersions(local, remote)) {
+        cloudNoteSeen(d);
+        cloudState.synced[id] = meta.updated;
+        return "same";
+      }
+      // Same text, different kept versions: whichever side changed last
+      // carries them, and nothing is lost either way.
+      if (dirty) return "kept";
+      return cloudStore(d, remote) ? "pulled" : "full";
     }
-    if (!cloudDirty(meta)) return cloudStore(d, remote) ? "pulled" : "full";
-    if (isPrefix(remote, local)) return "kept";
+    // Unchanged here since the last sync, and the writer had seen this
+    // device's last upload: the account's copy simply replaces it.
+    var overwritten = !dirty && !cloudSawMine(d);
+    if (!dirty && !overwritten) return cloudStore(d, remote) ? "pulled" : "full";
+    if (isPrefix(remote, local)) {
+      if (overwritten) cloudState.synced[id] = 0;   // this device's longer copy goes up again
+      return "kept";
+    }
     if (isPrefix(local, remote)) return cloudStore(d, remote) ? "pulled" : "full";
 
     // Changed in both places. Keep this device's version as a separate
-    // chat and let the original id carry the account's version. (Images
-    // belong to the original id, so deleting that chat later also removes
-    // the pictures the copy points to.)
+    // chat and let the original id carry the account's version. The copy
+    // shares the original's pictures; imageDeleteChat keeps any that
+    // another chat still shows.
     var copyId = newId();
+    var wasCurrent = id === currentChatId;
     if (!saveChat(copyId, local)) return "full";
     chats.push({ id: copyId, title: (meta.title || "Untitled chat") + " (this device's copy)", created: meta.created,
       updated: Date.now(), model: meta.model || "", count: local.length });
-    if (id === currentChatId) {
-      currentChatId = copyId;
-      storageSet(KEYS.currentChat, copyId);
+    if (wasCurrent) currentChatId = copyId;       // before storing, so the screen stays on the copy
+    if (!cloudStore(d, remote)) {
+      // No room for the account's version: undo the copy and try again later.
+      storageRemove(KEYS.chatPrefix + copyId);
+      chats = chats.filter(function (c) { return c.id !== copyId; });
+      if (wasCurrent) currentChatId = id;
+      return "full";
     }
-    cloudStore(d, remote);
+    if (wasCurrent) storageSet(KEYS.currentChat, copyId);
     return "copied";
   }
 
@@ -4588,10 +4676,20 @@
       kind: "profiles",
       profiles: profiles.map(function (p) {
         return { id: p.id, name: p.name, model: p.model || "", systemPrompt: p.systemPrompt || "", filters: p.filters || {},
-          includes: p.includes, isDefault: !!p.isDefault, created: p.created || 0, updated: p.updated || 0 };
+          includes: p.includes, isDefault: !!p.isDefault, starAt: p.starAt || 0, created: p.created || 0, updated: p.updated || 0 };
       }),
       gone: cloudState.goneProfiles
     };
+  }
+
+  // The same key for the account's record, to tell whether it already
+  // holds everything this device does.
+  function cloudRemoteProfilesKey(d) {
+    var list = d.profiles.map(function (r) {
+      return r && typeof r === "object" ? { id: r.id, name: r.name, model: r.model || "", systemPrompt: r.systemPrompt || "", filters: r.filters || {},
+        includes: r.includes, isDefault: !!r.isDefault, starAt: r.starAt || 0, created: r.created || 0, updated: r.updated || 0 } : r;
+    });
+    return JSON.stringify([list, d.gone && typeof d.gone === "object" ? d.gone : {}]);
   }
 
   function cloudProfilesKey() {
@@ -4615,8 +4713,17 @@
     d.profiles.forEach(function (r) {
       if (!r || typeof r !== "object" || typeof r.id !== "string" || typeof r.name !== "string" || !r.name.trim()) return;
       var stamp = typeof r.updated === "number" ? r.updated : 0;
+      var starAt = typeof r.starAt === "number" ? r.starAt : 0;
       var mine = profileById(r.id);
-      if (mine && (mine.updated || 0) >= stamp) return;
+      // The star is merged by its own timestamp, apart from the content.
+      var star = mine && (mine.starAt || 0) >= starAt
+        ? { isDefault: !!mine.isDefault, starAt: mine.starAt || 0 }
+        : { isDefault: r.isDefault === true, starAt: starAt };
+      if (mine && (mine.updated || 0) >= stamp) {
+        mine.isDefault = star.isDefault;
+        mine.starAt = star.starAt;
+        return;
+      }
       var copy = normaliseProfile({
         id: r.id,
         name: r.name.replace(/\s+/g, " ").trim().slice(0, 40),
@@ -4624,7 +4731,8 @@
         systemPrompt: typeof r.systemPrompt === "string" ? r.systemPrompt : "",
         filters: r.filters && typeof r.filters === "object" ? r.filters : {},
         includes: r.includes && typeof r.includes === "object" ? r.includes : undefined,
-        isDefault: r.isDefault === true,
+        isDefault: star.isDefault,
+        starAt: star.starAt,
         created: typeof r.created === "number" ? r.created : stamp,
         updated: stamp
       });
@@ -4634,7 +4742,7 @@
     profiles.forEach(function (p) { delete gone[p.id]; });
     // Two devices may each have starred a default: the latest choice stands.
     profiles.filter(function (p) { return p.isDefault; })
-      .sort(function (a, b) { return (b.updated || 0) - (a.updated || 0); })
+      .sort(function (a, b) { return (b.starAt || 0) - (a.starAt || 0) || (b.updated || 0) - (a.updated || 0); })
       .slice(1).forEach(function (p) { p.isDefault = false; });
     if (activeProfileId && !profileById(activeProfileId)) activeProfileId = null;
     storageSet(KEYS.profiles, JSON.stringify(profiles));
@@ -4748,16 +4856,28 @@
   // pulled: the account's key record if this sync's listing included it.
   async function cloudSyncKey(sk, userId, pulled, tally) {
     var kek = await cloudKek();
-    if (!kek) return;
     var local = storageGet(KEYS.apiKey) || "";
+    if (!kek) {
+      // Signed in before key sync existed, so there is nothing to decrypt with.
+      if (pulled && typeof pulled.ct === "string" && !local) tally.keyNeedsSignIn = true;
+      return;
+    }
 
     if (pulled && pulled.removed) {
-      // Syncing was turned off on another device. Keep the key that is here.
-      if (!cloudState.keyRemove) { cloudState.keySync = false; cloudState.keyPrint = ""; }
+      // Syncing was turned off on another device: keep the key that is
+      // here and stop syncing it, unless it was turned on here since.
+      var theirOff = typeof pulled.updated === "number" ? pulled.updated : 0;
+      if (!cloudState.keyRemove && !(cloudState.keySync && cloudState.keyOptAt > theirOff)) {
+        cloudState.keySync = false;
+      }
+      cloudState.keyPrint = "";
     } else if (pulled && typeof pulled.iv === "string" && typeof pulled.ct === "string") {
       var theirs = await keyDecrypt(kek, userId, pulled);
       if (!theirs) {
+        // Encrypted with an earlier password. With the key here and sync
+        // on, forget the fingerprint so a readable copy replaces it.
         if (!local) tally.keyUnreadable = true;
+        else if (cloudState.keySync) cloudState.keyPrint = "";
       } else if (theirs === local) {
         cloudState.keyPrint = await keyFingerprint(local);
       } else {
@@ -4846,17 +4966,26 @@
       var messages = localMessages(id);
       if (!messages.length) return false;
       var stamp = meta.updated;
+      var vv = {};
+      Object.keys(cloudState.vv[id] || {}).forEach(function (dev) { vv[dev] = cloudState.vv[id][dev]; });
+      vv[cloudState.dev] = (vv[cloudState.dev] || 0) + 1;
       var res = await cloudPut(sk, userId, id, { v: 1, id: id, title: meta.title || "", created: meta.created || stamp,
-        updated: stamp, model: meta.model || "", messages: messages });
+        updated: stamp, model: meta.model || "", messages: messages, vv: vv });
       if (res !== "taken") {
         cloudState.synced[id] = stamp;
+        cloudState.vv[id] = vv;
+        // Deleted while it was on its way up: the delete found nothing to
+        // record then, so record it now or the chat would come back.
+        if (!chatMeta(id)) cloudNoteDeleted(id);
         return true;
       }
       // The account already has a chat with this id that the pull did not
       // show. Merge it like any other, then upload whatever is still new.
       var got = await sk.getRecords({ unique_id: cloudUid(userId, id) });
       var rec = got && Array.isArray(got.list) ? got.list[0] : null;
-      if (rec && cloudApply(rec) === "copied") cloudAgain = true;   // the copy goes up on the next pass
+      var merged = rec ? cloudApply(rec) : "";
+      if (merged === "copied") cloudAgain = true;   // the copy goes up on the next pass
+      if (merged === "full" || merged === "later") return false;   // not merged, so it must not be overwritten
       if (!hasOwn(cloudState.synced, id)) cloudState.synced[id] = 0;
     }
     return false;
@@ -4893,7 +5022,7 @@
     cloudRerender = false;
     var userId = cloudUser.id;
     var still = function () { return cloudActive() && cloudUser.id === userId; };
-    var tally = { pulled: 0, pushed: 0, copied: 0, removed: 0, full: 0, failed: 0, error: "", profiles: false, key: "", keyUnreadable: false };
+    var tally = { pulled: 0, pushed: 0, copied: 0, removed: 0, full: 0, failed: 0, error: "", profiles: false, key: "", keyUnreadable: false, keyNeedsSignIn: false };
     var sk = null;
     setCloudNote("Syncing…");
     try {
@@ -4905,6 +5034,7 @@
       var hold = false;
       var seen = {};
       var pulledKey = null;
+      var blocked = {};   // chats whose account copy could not be merged in: never upload over those
       list.forEach(function (rec) {
         if (rec && rec.data && rec.data.kind === "key") pulledKey = rec.data;
         if (rec && rec.data && rec.data.kind === "profiles") {
@@ -4912,12 +5042,18 @@
           cloudMergeProfiles(rec.data);
           // In step with the account unless this device had changes of its own.
           if (cloudProfilesKey() !== before) tally.profiles = true;
-          if (cloudState.profiles === before) cloudState.profiles = cloudProfilesKey();
+          // In step only if the account holds exactly what is now here. If
+          // another device's upload left something of this one's out, the
+          // difference shows and the merged set is uploaded again.
+          if (Array.isArray(rec.data.profiles)) cloudState.profiles = cloudRemoteProfilesKey(rec.data);
         }
         var out = cloudApply(rec);
         if (rec && rec.data && typeof rec.data.id === "string") seen[rec.data.id] = true;
         if (hasOwn(tally, out)) tally[out]++;
-        if (out === "full" || out === "later") hold = true;
+        if (out === "full" || out === "later") {
+          hold = true;
+          blocked[rec.data.id] = true;
+        }
         if (rec && typeof rec.updated === "number" && rec.updated > newest) newest = rec.updated;
       });
       // A record that could not be applied must be offered again next time.
@@ -4932,6 +5068,7 @@
       var pending = chats.filter(cloudDirty).map(function (c) { return c.id; });
       for (var i = 0; i < pending.length; i++) {
         if (!still()) return;
+        if (blocked[pending[i]]) continue;
         if (isStreaming && pending[i] === currentChatId) { cloudAgain = true; continue; }
         try {
           if (await cloudPushChat(sk, userId, pending[i])) tally.pushed++;
@@ -4981,6 +5118,7 @@
       if (tally.key === "removed") bits.push("encrypted key removed from your account");
       if (tally.removed) bits.push(plural(tally.removed, "chat") + " deleted on another device removed here");
       var note = "Synced at " + formatWhen(cloudLastSync) + (bits.length ? ": " + bits.join(", ") : "") + ".";
+      if (tally.keyNeedsSignIn) note += " Your account holds an encrypted OpenRouter key. To receive it here, sign out and sign in again.";
       if (tally.keyUnreadable) note += " The key stored in your account was encrypted with an earlier password and can't be read here; enter it in settings once more.";
       if (tally.full) note += " This device's storage is full, so " + plural(tally.full, "chat") + " from your account couldn't be saved here.";
       if (tally.failed) note += " " + plural(tally.failed, "change") + " couldn't be uploaded (" + tally.error + ") and will be tried again; they are safe on this device.";
@@ -5012,6 +5150,7 @@
   function cloudNoteDeleted(id) {
     if (!hasOwn(cloudState.synced, id)) return;
     delete cloudState.synced[id];
+    delete cloudState.vv[id];
     cloudState.deleted[id] = Date.now();
     saveCloudState();
     cloudTouch();
@@ -5176,6 +5315,7 @@
       cloudState.keySync = true;
       cloudState.keyDeclined = false;
       cloudState.keyRemove = false;
+      cloudState.keyOptAt = Date.now();   // outranks an earlier "turned off" left in the account
     } else {
       cloudState.keySync = false;
       cloudState.keyRemove = true;   // take the encrypted copy out of the account; devices keep their own key
@@ -5204,6 +5344,45 @@
         ? "Settings and history are saved on this device. Chats also sync to your account."
         : "Settings and history are saved on this device only.";
   }
+
+  /* ---------------- Version ----------------
+     An installed copy shows the cached build first and only picks up a new
+     one on a later launch, so the build number is shown, with a way to
+     fetch the newest straight away. */
+  var versionText = document.getElementById("version-text");
+  var versionCheckBtn = document.getElementById("version-check");
+  versionText.textContent = "Version " + APP_VERSION;
+
+  async function checkForUpdate() {
+    versionCheckBtn.disabled = true;
+    var say = function (text) { versionText.textContent = "Version " + APP_VERSION + ". " + text; };
+    say("Checking…");
+    try {
+      var res = await fetch("sw.js", { cache: "no-store" });
+      var match = /orc-shell-v(\d+)/.exec(await res.text());
+      var latest = match ? Number(match[1]) : 0;
+      if (!res.ok || !latest) throw new Error("no version found");
+      if (latest <= APP_VERSION) { say("This is the latest."); return; }
+      say("Version " + latest + " is available. Updating…");
+      var reg = "serviceWorker" in navigator ? await navigator.serviceWorker.getRegistration() : null;
+      if (reg) {
+        // The new worker caches the new files as it installs; wait for it
+        // to take over so the reload is served from them.
+        var took = new Promise(function (resolve) {
+          navigator.serviceWorker.addEventListener("controllerchange", resolve, { once: true });
+          setTimeout(resolve, 15000);
+        });
+        await reg.update();
+        await took;
+      }
+      window.location.reload();
+    } catch (e) {
+      say("Couldn't check just now.");
+    } finally {
+      versionCheckBtn.disabled = false;
+    }
+  }
+  versionCheckBtn.addEventListener("click", checkForUpdate);
 
   /* ---------------- Service worker ---------------- */
   if ("serviceWorker" in navigator) {

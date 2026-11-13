@@ -12,7 +12,9 @@ phone, so every change ships as a PR that is merged to `main`, which deploys.
 - No backend and no build step. Static files served by GitHub Pages.
 - `index.html` holds all CSS, markup and JavaScript in one IIFE.
 - `sw.js` precaches the shell and `vendor/` files. **Bump `CACHE_NAME` on every
-  change to a shell file**, or installed copies keep the old version.
+  change to a shell file**, or installed copies keep the old version, **and
+  set `APP_VERSION` in `index.html` to the same number**: it is shown in
+  settings, and a test fails if the two differ.
 - `vendor/` holds marked, DOMPurify and KaTeX (fonts as woff2), vendored so
   nothing loads from a CDN. The service worker's file list must match it.
 - `vendor/skapi.js` is the Skapi SDK (`skapi-js` from npm, `dist/skapi.js`,
@@ -80,6 +82,12 @@ phone, so every change ships as a PR that is merged to `main`, which deploys.
   record fails with "User has no access to update this record"; record data
   over 32 KB is stored as a file transparently; `$updated` works as an index
   on private tables. The fake in `tests/e2e.mjs` copies these.
+- Skapi has no conditional write, so two devices can upload over each
+  other. Each chat upload carries a version vector (`vv`: uploads per
+  device); a pulled copy that shows fewer uploads from this device than it
+  has made is merged as a conflict, never taken as a plain update. A chat
+  whose account copy could not be merged in (storage full, busy) must not
+  be uploaded in that sync.
 - An interrupted reply can be continued or regenerated (`redoLast`). The
   cut-off reply is taken off `history` in memory only and stays in storage
   until its replacement is filed, so it must be put back on every path
