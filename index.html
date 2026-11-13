@@ -315,6 +315,19 @@
     cursor: pointer;
   }
 
+  .versions { display: inline-flex; align-items: center; gap: 2px; font-size: 11px; opacity: 0.8; flex: none; }
+  .versions button {
+    background: none;
+    border: none;
+    color: inherit;
+    font: inherit;
+    font-size: 15px;
+    line-height: 1;
+    padding: 4px 7px;
+    cursor: pointer;
+  }
+  .versions button:disabled { opacity: 0.3; cursor: default; }
+
   #empty-state {
     color: var(--text-muted);
     text-align: center;
@@ -1633,6 +1646,7 @@
       }
     }
     if (m.stopped) bits.push("stopped");
+    if (m.continued) bits.push("continued after a drop");
     if (m.interrupted) bits.push("interrupted");
     return bits.join(" · ");
   }
@@ -1655,6 +1669,7 @@
       metaEl.className = "meta";
       metaEl.textContent = m.role === "assistant" ? formatMeta(m) : "";
       actions.appendChild(metaEl);
+      if (Array.isArray(m.versions) && m.versions.length > 1) actions.appendChild(buildVersionSwitch(m));
       if (m.content) actions.appendChild(makeCopyButton("Copy message", function () { return m.content; }));
       el.appendChild(actions);
     }
@@ -1679,27 +1694,75 @@
     return el;
   }
 
-  // A reply cut off by a dropped connection is kept as far as it got. This
-  // offers to throw that part away and ask again.
+  /* A regenerated reply keeps what it replaced. An assistant entry may carry
+     "versions" (snapshots of every version, the shown one included) and "v"
+     (which one is shown); its ordinary fields always mirror versions[v], so
+     everything else can ignore versions entirely. */
+  var VERSION_FIELDS = ["content", "model", "requested", "provider", "usage", "timing", "stopped", "interrupted", "continued", "images", "refined"];
+
+  function versionOf(m) {
+    var snap = {};
+    VERSION_FIELDS.forEach(function (k) { if (m[k] !== undefined) snap[k] = m[k]; });
+    return snap;
+  }
+
+  function showVersion(m, index) {
+    if (isStreaming || !Array.isArray(m.versions) || !m.versions[index]) return;
+    VERSION_FIELDS.forEach(function (k) { delete m[k]; });
+    var snap = m.versions[index];
+    Object.keys(snap).forEach(function (k) { m[k] = snap[k]; });
+    if (typeof m.content !== "string") m.content = "";
+    m.v = index;
+    persistHistory();
+    renderHistory();
+  }
+
+  function buildVersionSwitch(m) {
+    var at = typeof m.v === "number" ? m.v : m.versions.length - 1;
+    var box = document.createElement("span");
+    box.className = "versions";
+    var step = function (label, name, to) {
+      var btn = document.createElement("button");
+      btn.type = "button";
+      btn.textContent = label;
+      btn.setAttribute("aria-label", name);
+      btn.disabled = to < 0 || to >= m.versions.length;
+      btn.addEventListener("click", function () { showVersion(m, to); });
+      return btn;
+    };
+    var count = document.createElement("span");
+    count.textContent = (at + 1) + "/" + m.versions.length;
+    box.appendChild(step("‹", "Earlier version", at - 1));
+    box.appendChild(count);
+    box.appendChild(step("›", "Later version", at + 1));
+    return box;
+  }
+
+  // A reply cut off by a dropped connection is kept as far as it got. From
+  // there it can be continued from where it stopped, or asked for afresh
+  // with the cut-off reply kept as an earlier version.
   function showInterrupted() {
-    var el = showError("The connection dropped before this reply finished, which usually means the app went into the background. The part that arrived was kept.", false);
-    var btn = document.createElement("button");
-    btn.className = "retry-btn";
-    btn.type = "button";
-    btn.textContent = "Regenerate";
-    btn.addEventListener("click", regenerateLast);
-    el.appendChild(btn);
+    var el = showError("The connection dropped before this reply finished, which usually means the app went into the background. The part that arrived was kept. Continue picks up where it stopped; Regenerate asks again and keeps this as an earlier version.", false);
+    [["Continue", "continue"], ["Regenerate", "regenerate"]].forEach(function (pair) {
+      var btn = document.createElement("button");
+      btn.className = "retry-btn";
+      btn.type = "button";
+      btn.textContent = pair[0];
+      btn.addEventListener("click", function () { redoLast(pair[1]); });
+      el.appendChild(btn);
+    });
     return el;
   }
 
-  function regenerateLast() {
+  // The cut-off reply leaves the list on screen but stays in storage until
+  // its replacement is filed, so closing the app part-way loses nothing.
+  function redoLast(mode) {
     if (isStreaming) return;
     var last = history[history.length - 1];
     if (!last || last.role !== "assistant" || !last.interrupted) return;
     history.pop();
-    persistHistory();
     renderHistory();
-    sendMessage(true);
+    sendMessage(true, { mode: mode, prior: last });
   }
 
   function removeTransient() {
@@ -3425,7 +3488,14 @@
     return out;
   }
 
-  async function sendMessage(retrying) {
+  // What the model is told when asked to carry on a reply that was cut off.
+  // It is sent after the partial reply and never stored in the chat.
+  var CONTINUE_NOTE = "Your previous reply was cut off by a dropped connection. Continue it from exactly where it stopped: begin with the very next characters, do not repeat anything already written, and do not mention the interruption.";
+
+  // redo: { mode: "continue" | "regenerate", prior: the cut-off reply }, set
+  // by redoLast(). The prior reply has been taken off `history` in memory
+  // only; it is put back if no replacement arrives.
+  async function sendMessage(retrying, redo) {
     if (isStreaming) return;
 
     var text;
@@ -3458,11 +3528,20 @@
 
     var apiMessages = buildApiMessages();
     var sendChatId = currentChatId;   // the chat this reply belongs to, even if the user switches away
+    var base = redo && redo.mode === "continue" ? redo.prior.content : "";   // text a continuation is added to
+
+    function restorePrior() {
+      if (!redo || currentChatId !== sendChatId) return;
+      history.push(redo.prior);
+      renderHistory();
+    }
 
     if (isImageModel(model)) {
+      if (redo) { restorePrior(); return; }   // an image model can't take over a text reply
       await generateImage(text, model, key, sendChatId);
       return;
     }
+    if (base) apiMessages.push({ role: "assistant", content: base }, { role: "user", content: CONTINUE_NOTE });
 
     setStreamingUI(true);
     // Stop cancels userAbort. Each connection attempt has its own
@@ -3474,10 +3553,11 @@
     userAbort.signal.addEventListener("abort", function () { if (attemptAbort) attemptAbort.abort(); });
 
     var assistantEl = appendMessageEl({ role: "assistant", content: "" });
+    if (base) { assistantEl.innerHTML = renderMarkdown(base); decorateCodeBlocks(assistantEl); }
     assistantEl.classList.add("streaming");
     scrollToBottom(true);
 
-    var fullText = "";
+    var fullText = "";   // what this request has produced; a continuation is shown and stored after `base`
     var usage = null;
     var tStart = performance.now();
     var tFirst = null;
@@ -3496,7 +3576,7 @@
       if (renderTimer) return;
       renderTimer = setTimeout(function () {
         renderTimer = null;
-        assistantEl.innerHTML = renderMarkdown(fullText);
+        assistantEl.innerHTML = renderMarkdown(base + fullText);
         decorateCodeBlocks(assistantEl);
         scrollToBottom(false);
       }, 100);
@@ -3510,11 +3590,31 @@
     function finish(entry) {
       entry.timing = timing();
       if (renderTimer) { clearTimeout(renderTimer); renderTimer = null; }
+      if (redo) {
+        var prior = redo.prior;
+        var versions = Array.isArray(prior.versions) && prior.versions.length ? prior.versions.slice() : [versionOf(prior)];
+        var at = typeof prior.v === "number" && versions[prior.v] ? prior.v : versions.length - 1;
+        if (redo.mode === "continue") {
+          versions[at] = versionOf(entry);          // the same version, now longer
+        } else {
+          versions.push(versionOf(entry));          // a new version; the cut-off one stays
+          at = versions.length - 1;
+        }
+        if (versions.length > 1) { entry.versions = versions; entry.v = at; }
+        // If the user has moved to another chat, the cut-off reply is still
+        // the last thing stored in this one: take it out before filing.
+        if (currentChatId !== sendChatId) {
+          var stored = loadChat(sendChatId);
+          var tail = stored[stored.length - 1];
+          if (tail && tail.role === "assistant" && tail.interrupted) { stored.pop(); saveChat(sendChatId, stored); }
+        }
+      }
       fileReply(entry, sendChatId, assistantEl);
     }
 
     function reply(extra) {
-      var entry = { role: "assistant", content: fullText, model: servedModel || model, requested: model, provider: servedProvider, usage: usage };
+      var entry = { role: "assistant", content: base + fullText, model: servedModel || model, requested: model, provider: servedProvider, usage: usage };
+      if (base) entry.continued = true;
       if (extra) entry[extra] = true;
       return entry;
     }
@@ -3631,7 +3731,8 @@
     function stoppedEmpty() {
       if (currentChatId !== sendChatId) return;
       assistantEl.remove();
-      showError("Stopped before any reply arrived.", true);
+      restorePrior();
+      showError(redo ? "Stopped before anything more arrived. The earlier part is still here." : "Stopped before any reply arrived.", !redo);
     }
 
     try {
@@ -3658,7 +3759,7 @@
               break;
             }
             assistantEl.classList.remove("generating");
-            assistantEl.textContent = "";
+            assistantEl.innerHTML = base ? renderMarkdown(base) : "";
             continue;
           }
 
@@ -3671,10 +3772,11 @@
             if (currentChatId === sendChatId) showInterrupted();
           } else if (currentChatId === sendChatId) {
             assistantEl.remove();
+            restorePrior();
             var why = err && err.message ? err.message : "unknown error";
             showError(dropped
-              ? "The connection dropped and couldn't be restored (" + why + "). Your message is saved; retry when you're back online."
-              : "Request failed: " + why, true);
+              ? "The connection dropped and couldn't be restored (" + why + "). " + (redo ? "The earlier part is still here." : "Your message is saved; retry when you're back online.")
+              : "Request failed: " + why, !redo);
           }
           break;
         }

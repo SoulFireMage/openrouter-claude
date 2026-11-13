@@ -40,7 +40,7 @@ Features, roughly in the order they were built:
 
 ## State of `main`
 
-- Service worker cache: `orc-shell-v24`. Bump it on every shell change.
+- Service worker cache: `orc-shell-v25`. Bump it on every shell change.
 - Tests: `tests/e2e.mjs`, about 275 named checks, all passing in November
   2026 after the account, sync and resilience work (see below).
   Run as described in `tests/README.md` (serve the repo on port 8765; the

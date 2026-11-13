@@ -1352,17 +1352,72 @@ await idle();
 let cut = await curChat();
 check("drop: a partial reply is kept and marked interrupted", cut[cut.length - 1].role === "assistant" && cut[cut.length - 1].content === "half an answer and " && cut[cut.length - 1].interrupted === true, JSON.stringify(cut[cut.length - 1]));
 check("drop: no second request is made once text has arrived", (await page.evaluate(() => window.__requests.length)) === 1);
-check("drop: the footer and notice say what happened", (await page.$$eval(".msg.assistant .meta", els => els.pop().textContent)).includes("interrupted") && (await page.textContent(".msg.error")).includes("The part that arrived was kept") && (await page.textContent(".msg.error .retry-btn")) === "Regenerate", await page.textContent(".msg.error"));
+check("drop: the footer and notice say what happened", (await page.$$eval(".msg.assistant .meta", els => els.pop().textContent)).includes("interrupted") && (await page.textContent(".msg.error")).includes("The part that arrived was kept") && (await page.$$eval(".msg.error .retry-btn", bs => bs.map(b => b.textContent))).join() === "Continue,Regenerate", await page.textContent(".msg.error"));
 await page.reload({ waitUntil: "load" });
-check("drop: the offer to regenerate survives a reload", (await page.$$(".msg.error .retry-btn")).length === 1 && (await page.textContent(".msg.error .retry-btn")) === "Regenerate");
+check("drop: the offer to continue or regenerate survives a reload", (await page.$$eval(".msg.error .retry-btn", bs => bs.map(b => b.textContent))).join() === "Continue,Regenerate");
+const redoBtn = (label) => page.click('.msg.error .retry-btn:text-is("' + label + '")');
+const lastMsg = async () => (await curChat()).pop();
+
+// Continue: the partial reply is sent back with a note, and the new text is added to it.
+const beforeRedo = (await curChat()).length;
+await page.evaluate(() => { window.__requests = []; window.__scenarios.push({ kind: "ok", text: "the rest of it." }); });
+await redoBtn("Continue");
+await page.waitForFunction(() => document.querySelector("#messages").textContent.includes("the rest of it."));
+await idle();
+cut = await curChat();
+check("continue: the new text is added to the part that had arrived", cut.length === beforeRedo && cut[cut.length - 1].content === "half an answer and the rest of it." && !cut[cut.length - 1].interrupted && cut[cut.length - 1].continued === true, JSON.stringify(cut.slice(-1)));
+const contReq = await page.evaluate(() => window.__requests[0].messages.slice(-3));
+check("continue: the request carries the partial reply and a note to carry on", contReq[0].role === "user" && contReq[0].content === "cut me off" && contReq[1].role === "assistant" && contReq[1].content === "half an answer and " && contReq[2].role === "user" && /Continue it from exactly where it stopped/.test(contReq[2].content), JSON.stringify(contReq));
+check("continue: the note is never stored or shown", !JSON.stringify(cut).includes("cut off by a dropped connection") && !(await page.textContent("#messages")).includes("cut off by a dropped connection") && cut.every(m => m.role === "user" || m.role === "assistant"));
+check("continue: no error is left and the footer says it was continued", (await page.$$(".msg.error")).length === 0 && (await page.$$eval(".msg.assistant .meta", els => els.pop().textContent)).includes("continued after a drop") && (await page.$$(".versions")).length === 0);
+
+// A continuation that drops again keeps everything so far and can be continued again.
+await page.evaluate(() => window.__scenarios.push({ kind: "drop-mid", text: "first part, " }));
+await send("cut twice");
+await page.waitForSelector(".msg.error .retry-btn");
+await idle();
+await page.evaluate(() => window.__scenarios.push({ kind: "drop-mid", text: "second part, " }));
+await redoBtn("Continue");
+await page.waitForFunction(() => document.querySelector("#messages").textContent.includes("second part,") && !!document.querySelector(".msg.error .retry-btn") && !document.querySelector("#send-btn").classList.contains("stop"));
+check("continue: a second drop keeps both parts, still marked interrupted", (await lastMsg()).content === "first part, second part, " && (await lastMsg()).interrupted === true, JSON.stringify(await lastMsg()));
+
+// A continuation that fails outright leaves the partial reply exactly as it was.
+await page.evaluate(() => { window.__requests = []; window.__scenarios.push({ kind: "http", status: 500, message: "Upstream down" }); });
+await redoBtn("Continue");
+await page.waitForFunction(() => document.querySelector("#messages").textContent.includes("Upstream down"));
+await idle();
+check("continue: a failed attempt leaves the partial reply untouched", (await lastMsg()).content === "first part, second part, " && (await lastMsg()).interrupted === true && (await page.textContent("#messages")).includes("first part, second part,") && (await page.$$eval(".msg.error .retry-btn", bs => bs.map(b => b.textContent))).join() === "Continue,Regenerate", await page.textContent("#messages"));
+await page.reload({ waitUntil: "load" });
+check("continue: and it is still there after a reload", (await lastMsg()).content === "first part, second part, " && (await page.textContent("#messages")).includes("first part, second part,"));
+
+// Regenerate: a fresh reply, with the cut-off one kept as an earlier version.
 const beforeRegen = (await curChat()).length;
 await page.evaluate(() => { window.__requests = []; window.__scenarios.push({ kind: "ok", text: "the whole answer" }); });
-await page.click(".msg.error .retry-btn");
+await redoBtn("Regenerate");
 await page.waitForFunction(() => document.querySelector("#messages").textContent.includes("the whole answer"));
 await idle();
 cut = await curChat();
-check("drop: Regenerate replaces the partial reply", cut.length === beforeRegen && cut[cut.length - 1].content === "the whole answer" && !cut[cut.length - 1].interrupted && !(await page.textContent("#messages")).includes("half an answer"), JSON.stringify(cut.slice(-2)));
-check("drop: Regenerate does not send the partial reply back", !JSON.stringify(await page.evaluate(() => window.__requests[0].messages)).includes("half an answer"));
+check("drop: Regenerate replaces the partial reply", cut.length === beforeRegen && cut[cut.length - 1].content === "the whole answer" && !cut[cut.length - 1].interrupted && !(await page.textContent("#messages")).includes("first part"), JSON.stringify(cut.slice(-2)));
+check("drop: Regenerate does not send the partial reply back", !JSON.stringify(await page.evaluate(() => window.__requests[0].messages)).includes("first part"));
+check("regenerate: the cut-off reply is kept as an earlier version", cut[cut.length - 1].versions.length === 2 && cut[cut.length - 1].v === 1 && cut[cut.length - 1].versions[0].content === "first part, second part, " && cut[cut.length - 1].versions[0].interrupted === true && (await page.textContent(".versions")) === "‹2/2›", JSON.stringify(cut[cut.length - 1].versions));
+await page.click('.versions button[aria-label="Earlier version"]');
+await page.waitForFunction(() => document.querySelector(".versions").textContent === "‹1/2›");
+check("regenerate: stepping back shows the earlier version and offers to continue it", (await lastMsg()).content === "first part, second part, " && (await lastMsg()).v === 0 && (await page.textContent("#messages")).includes("first part, second part,") && !(await page.textContent("#messages")).includes("the whole answer") && (await page.$$(".msg.error .retry-btn")).length === 2);
+// Continuing the earlier version lengthens that version and leaves the other alone.
+await page.evaluate(() => window.__scenarios.push({ kind: "ok", text: "third part." }));
+await redoBtn("Continue");
+await page.waitForFunction(() => document.querySelector("#messages").textContent.includes("third part."));
+await idle();
+let ver = await lastMsg();
+check("regenerate: continuing an earlier version keeps the other version", ver.content === "first part, second part, third part." && ver.v === 0 && ver.versions.length === 2 && ver.versions[0].content === ver.content && ver.versions[1].content === "the whole answer", JSON.stringify(ver.versions.map(v => v.content)));
+await page.click('.versions button[aria-label="Later version"]');
+await page.waitForFunction(() => document.querySelector(".versions").textContent === "‹2/2›");
+check("regenerate: stepping forward returns to the newer version", (await lastMsg()).content === "the whole answer" && (await page.$$(".msg.error")).length === 0);
+await page.evaluate(() => { window.__requests = []; window.__scenarios.push({ kind: "ok", text: "next" }); });
+await send("and then?");
+await idle();
+const nextReq = JSON.stringify(await page.evaluate(() => window.__requests[0].messages));
+check("regenerate: only the shown version is sent on", !nextReq.includes("first part") && nextReq.includes("the whole answer"), nextReq.slice(-300));
 
 // A dropped image request is not retried (it may have been billed), but is explained.
 await page.evaluate(() => { localStorage.setItem("__imgMode", "on"); localStorage.setItem("orc_model", "acme/pixel-1"); });

@@ -34,8 +34,11 @@ just static files.
   when you switch apps or tabs, and a page can't prevent that. If no text had
   arrived yet, the app reconnects by itself once it is back in front and
   online (up to two attempts). If part of a reply had arrived, that part is
-  kept and marked "interrupted", with a **Regenerate** button, rather than
-  being replaced by an error. Image requests are not retried automatically,
+  kept and marked "interrupted", rather than being replaced by an error.
+  **Continue** sends the partial reply back with a note asking the model to
+  carry on from where it stopped, and adds what comes back to it.
+  **Regenerate** asks again and keeps the cut-off reply as an earlier
+  version; the ‹ › control on the reply steps between versions. Image requests are not retried automatically,
   because a dropped one may still have been billed.
 - Optional account and sync. Sign in or create an account in settings to keep
   chats in step across devices; without one the app behaves exactly as
