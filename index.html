@@ -971,6 +971,16 @@
   #cloud-box input { margin-top: 6px; }
   #cloud-box .btn-row { margin-top: 8px; }
   #cloud-who { font-size: 14px; color: var(--text); overflow-wrap: anywhere; }
+  #settings-panel #cloud-key-row {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    margin: 12px 0 0;
+    font-size: 13px;
+    color: var(--text);
+  }
+  #settings-panel #cloud-key-row input { width: auto; margin: 2px 0 0; padding: 0; flex: none; }
+  #settings-panel #cloud-key-row[hidden] { display: none; }
 
   .storage-note {
     font-size: 11px;
@@ -1194,9 +1204,11 @@
           <button type="button" class="btn" id="cloud-sync-now">Sync now</button>
           <button type="button" class="btn" id="cloud-sign-out">Sign out</button>
         </div>
+        <label id="cloud-key-row" for="cloud-key-sync"><input type="checkbox" id="cloud-key-sync"> <span>Also sync my OpenRouter key, encrypted with my password</span></label>
+        <div class="hint" id="cloud-key-hint"></div>
       </div>
       <div class="hint" id="cloud-status" role="status"></div>
-      <div class="hint">Without an account everything stays on this device, exactly as before. With one, your chats are also kept in a private store that only you can read, and are merged across your devices. Chats already on this device are uploaded when you first sign in and merged with the account's, never overwritten. Profiles sync too. Your OpenRouter key and generated images never leave this device.</div>
+      <div class="hint">Without an account everything stays on this device, exactly as before. With one, your chats are also kept in a private store that only you can read, and are merged across your devices. Chats already on this device are uploaded when you first sign in and merged with the account's, never overwritten. Profiles sync too. Generated images never leave this device, and neither does your OpenRouter key unless you choose, once signed in, to sync an encrypted copy of it.</div>
     </div>
 
     <div class="warning">
@@ -1269,6 +1281,7 @@
     imageOpts: "orc_image_opts",
     cloudUser: "orc_cloud_user",
     cloudState: "orc_cloud_state",
+    cloudKek: "orc_cloud_kek",
     // Left over from the per-device Artificial Analysis key; removed on load.
     legacyAA: ["orc_aa_key", "orc_aa_cache", "orc_aa_attempt"]
   };
@@ -2778,6 +2791,7 @@
     updateComposerEnabled();
     renderProfileControls();
     closeSettings();
+    cloudTouch();   // a changed key may need to go up
   });
 
   clearChatBtn.addEventListener("click", function () {
@@ -2794,6 +2808,7 @@
     storageRemove(KEYS.apiKey);
     apiKeyInput.value = "";
     updateComposerEnabled();
+    cloudKeyForgotten();
   });
 
   /* ---------------- Composer ---------------- */
@@ -4385,6 +4400,9 @@
     who: document.getElementById("cloud-who"),
     syncNow: document.getElementById("cloud-sync-now"),
     signOut: document.getElementById("cloud-sign-out"),
+    keyRow: document.getElementById("cloud-key-row"),
+    keySync: document.getElementById("cloud-key-sync"),
+    keyHint: document.getElementById("cloud-key-hint"),
     status: document.getElementById("cloud-status")
   };
 
@@ -4413,7 +4431,8 @@
   }
 
   function freshCloudState(userId) {
-    return { user: userId || "", cursor: 0, synced: {}, deleted: {}, profiles: NO_PROFILES, goneProfiles: {} };
+    return { user: userId || "", cursor: 0, synced: {}, deleted: {}, profiles: NO_PROFILES, goneProfiles: {},
+      keySync: false, keyPrint: "", keyRemove: false, keyDeclined: false };
   }
 
   function readCloudState() {
@@ -4424,6 +4443,10 @@
     if (!st.deleted || typeof st.deleted !== "object") st.deleted = {};
     if (typeof st.profiles !== "string") st.profiles = NO_PROFILES;
     if (!st.goneProfiles || typeof st.goneProfiles !== "object") st.goneProfiles = {};
+    st.keySync = st.keySync === true;
+    st.keyRemove = st.keyRemove === true;
+    st.keyDeclined = st.keyDeclined === true;
+    if (typeof st.keyPrint !== "string") st.keyPrint = "";
     return st;
   }
 
@@ -4638,6 +4661,148 @@
     cloudState.profiles = key;
   }
 
+  /* ----- The OpenRouter key (opt-in) -----
+     Off unless the box is ticked. The key is encrypted in this browser and
+     only the ciphertext is uploaded (record ending "~key", kind "key"), so
+     the account never holds anything that can be spent.
+
+     The encrypting key is derived from the account password when signing
+     in (PBKDF2-SHA256, then AES-GCM). The password itself is never kept;
+     the derived key is kept on this device (orc_cloud_kek) so later syncs
+     can work, which exposes nothing the OpenRouter key stored beside it
+     does not already. A new device derives the same key at sign-in and so
+     can read the copy. After a password reset the old copy can no longer
+     be read: the key is typed in once more and uploaded afresh.
+
+     keyPrint is a fingerprint of the key as it was when last in step with
+     the account, so a key changed here is uploaded and a key changed
+     elsewhere is taken up, but never the wrong way round. */
+  var KEY_ITERATIONS = 310000;
+  var subtle = window.crypto && window.crypto.subtle ? window.crypto.subtle : null;
+
+  function toB64(buf) {
+    var bytes = new Uint8Array(buf);
+    var bin = "";
+    for (var i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+    return btoa(bin);
+  }
+
+  function fromB64(text) {
+    var bin = atob(text);
+    var bytes = new Uint8Array(bin.length);
+    for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    return bytes;
+  }
+
+  // Called with the password at sign-in, the only moment it is available.
+  async function cloudDeriveKek(password, userId) {
+    if (!subtle) return;
+    var enc = new TextEncoder();
+    var material = await subtle.importKey("raw", enc.encode(password), "PBKDF2", false, ["deriveBits"]);
+    var bits = await subtle.deriveBits({ name: "PBKDF2", hash: "SHA-256", salt: enc.encode("orc-key:" + userId), iterations: KEY_ITERATIONS }, material, 256);
+    storageSet(KEYS.cloudKek, toB64(bits));
+  }
+
+  async function cloudKek() {
+    var raw = storageGet(KEYS.cloudKek);
+    if (!subtle || !raw) return null;
+    try {
+      return await subtle.importKey("raw", fromB64(raw), "AES-GCM", false, ["encrypt", "decrypt"]);
+    } catch (e) {
+      return null;
+    }
+  }
+
+  async function keyFingerprint(value) {
+    var digest = await subtle.digest("SHA-256", new TextEncoder().encode("orc-key-print:" + value));
+    return toB64(digest);
+  }
+
+  async function keyEncrypt(kek, userId, value) {
+    var iv = window.crypto.getRandomValues(new Uint8Array(12));
+    var enc = new TextEncoder();
+    var ct = await subtle.encrypt({ name: "AES-GCM", iv: iv, additionalData: enc.encode(userId) }, kek, enc.encode(value));
+    return { iv: toB64(iv), ct: toB64(ct) };
+  }
+
+  // Null when it can't be read, which is what a changed password looks like.
+  async function keyDecrypt(kek, userId, d) {
+    try {
+      var plain = await subtle.decrypt({ name: "AES-GCM", iv: fromB64(d.iv), additionalData: new TextEncoder().encode(userId) }, kek, fromB64(d.ct));
+      return new TextDecoder().decode(plain) || null;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  async function cloudPutKeyRecord(sk, userId, data) {
+    var uid = cloudUid(userId, "~key");
+    try {
+      await sk.postRecord(data, { record_id: uid });
+    } catch (e) {
+      if (!/no access to update|not exist/i.test(errText(e))) throw e;
+      await sk.postRecord(data, { unique_id: uid, table: CLOUD_TABLE });
+    }
+  }
+
+  // pulled: the account's key record if this sync's listing included it.
+  async function cloudSyncKey(sk, userId, pulled, tally) {
+    var kek = await cloudKek();
+    if (!kek) return;
+    var local = storageGet(KEYS.apiKey) || "";
+
+    if (pulled && pulled.removed) {
+      // Syncing was turned off on another device. Keep the key that is here.
+      if (!cloudState.keyRemove) { cloudState.keySync = false; cloudState.keyPrint = ""; }
+    } else if (pulled && typeof pulled.iv === "string" && typeof pulled.ct === "string") {
+      var theirs = await keyDecrypt(kek, userId, pulled);
+      if (!theirs) {
+        if (!local) tally.keyUnreadable = true;
+      } else if (theirs === local) {
+        cloudState.keyPrint = await keyFingerprint(local);
+      } else {
+        var unchangedHere = cloudState.keySync && !!local && (await keyFingerprint(local)) === cloudState.keyPrint;
+        if ((!local && !cloudState.keyDeclined) || unchangedHere) {
+          storageSet(KEYS.apiKey, theirs);
+          local = theirs;
+          cloudState.keySync = true;
+          cloudState.keyPrint = await keyFingerprint(theirs);
+          tally.key = "received";
+          apiKeyInput.value = theirs;
+          updateComposerEnabled();
+          if (history.length === 0) cloudRerender = true;
+          fetchModels(theirs);
+        }
+      }
+    }
+
+    if (cloudState.keyRemove) {
+      await cloudPutKeyRecord(sk, userId, { v: 1, kind: "key", removed: true, updated: Date.now() });
+      cloudState.keyRemove = false;
+      cloudState.keyPrint = "";
+      tally.key = "removed";
+    } else if (cloudState.keySync && local) {
+      var print = await keyFingerprint(local);
+      if (print !== cloudState.keyPrint) {
+        var sealed = await keyEncrypt(kek, userId, local);
+        await cloudPutKeyRecord(sk, userId, { v: 1, kind: "key", iv: sealed.iv, ct: sealed.ct, updated: Date.now() });
+        cloudState.keyPrint = print;
+        if (!tally.key) tally.key = "sent";
+      }
+    }
+  }
+
+  // "Forget API key" must stick: stop syncing it here and don't take it
+  // back from the account unless the box is ticked again.
+  function cloudKeyForgotten() {
+    if (!cloudState.keySync && !storageGet(KEYS.cloudKek)) return;
+    cloudState.keySync = false;
+    cloudState.keyDeclined = true;
+    cloudState.keyPrint = "";
+    saveCloudState();
+    renderCloud();
+  }
+
   /* ----- Talking to Skapi ----- */
   async function cloudList(sk, since) {
     var query = { table: CLOUD_TABLE };
@@ -4728,7 +4893,7 @@
     cloudRerender = false;
     var userId = cloudUser.id;
     var still = function () { return cloudActive() && cloudUser.id === userId; };
-    var tally = { pulled: 0, pushed: 0, copied: 0, removed: 0, full: 0, failed: 0, error: "", profiles: false };
+    var tally = { pulled: 0, pushed: 0, copied: 0, removed: 0, full: 0, failed: 0, error: "", profiles: false, key: "", keyUnreadable: false };
     var sk = null;
     setCloudNote("Syncing…");
     try {
@@ -4739,7 +4904,9 @@
       var newest = cloudState.cursor;
       var hold = false;
       var seen = {};
+      var pulledKey = null;
       list.forEach(function (rec) {
+        if (rec && rec.data && rec.data.kind === "key") pulledKey = rec.data;
         if (rec && rec.data && rec.data.kind === "profiles") {
           var before = cloudProfilesKey();
           cloudMergeProfiles(rec.data);
@@ -4782,6 +4949,14 @@
           tally.error = errText(e);
         }
       }
+      if (still()) {
+        try {
+          await cloudSyncKey(sk, userId, pulledKey, tally);
+        } catch (e) {
+          tally.failed++;
+          tally.error = errText(e);
+        }
+      }
       var gone = Object.keys(cloudState.deleted);
       for (var j = 0; j < gone.length; j++) {
         if (!still()) return;
@@ -4801,11 +4976,15 @@
       if (tally.pushed) bits.push(plural(tally.pushed, "chat") + " uploaded");
       if (tally.copied) bits.push(plural(tally.copied, "chat") + " changed in two places, so both versions were kept");
       if (tally.profiles) bits.push("profiles brought up to date");
+      if (tally.key === "received") bits.push("OpenRouter key received");
+      if (tally.key === "sent") bits.push("encrypted key uploaded");
+      if (tally.key === "removed") bits.push("encrypted key removed from your account");
       if (tally.removed) bits.push(plural(tally.removed, "chat") + " deleted on another device removed here");
       var note = "Synced at " + formatWhen(cloudLastSync) + (bits.length ? ": " + bits.join(", ") : "") + ".";
+      if (tally.keyUnreadable) note += " The key stored in your account was encrypted with an earlier password and can't be read here; enter it in settings once more.";
       if (tally.full) note += " This device's storage is full, so " + plural(tally.full, "chat") + " from your account couldn't be saved here.";
       if (tally.failed) note += " " + plural(tally.failed, "change") + " couldn't be uploaded (" + tally.error + ") and will be tried again; they are safe on this device.";
-      setCloudNote(note, tally.full > 0 || tally.failed > 0);
+      setCloudNote(note, tally.full > 0 || tally.failed > 0 || tally.keyUnreadable);
     } catch (e) {
       if (still()) {
         setCloudNote("Couldn't sync (" + errText(e) + "). Your chats are safe on this device and will sync later.", true);
@@ -4883,6 +5062,9 @@
     cloudMode = "login";
     if (!profile || !profile.user_id) return "Account created. Confirm it from the email you were sent, then sign in.";
     cloudAdopt(profile);
+    try {
+      await cloudDeriveKek(password, profile.user_id);
+    } catch (e) { /* no key sync on this device; everything else works */ }
     cloudSync(true);
     return "";
   }
@@ -4900,6 +5082,7 @@
     cloudTimer = null;
     cloudUser = null;
     storageRemove(KEYS.cloudUser);
+    storageRemove(KEYS.cloudKek);
     cloudBusy = false;
     setCloudNote("Signed out. Your chats are still on this device.");
   }
@@ -4929,6 +5112,14 @@
       cloudBox.who.textContent = "Signed in as " + (cloudUser.email || "your account") + ".";
       cloudBox.syncNow.disabled = cloudBusy || cloudSyncing;
       cloudBox.signOut.disabled = cloudBusy;
+      cloudBox.keyRow.hidden = !subtle;
+      cloudBox.keyHint.hidden = !subtle;
+      cloudBox.keySync.checked = cloudState.keySync;
+      if (!cloudKeyHintSticky) {
+        cloudBox.keyHint.textContent = cloudState.keySync
+          ? "On. The key is scrambled in this browser before it is uploaded, so your account only ever holds a copy nobody can use without your password. If you reset your password, enter the key once more."
+          : "Off: the key stays on this device only.";
+      }
     } else {
       cloudBox.code.hidden = cloudMode !== "reset";
       cloudBox.code.required = cloudMode === "reset";
@@ -4971,6 +5162,28 @@
     setCloudNote("Enter your email and a reset code will be sent to it.");
   });
   cloudBox.syncNow.addEventListener("click", function () { cloudSync(true); });
+  var cloudKeyHintSticky = false;
+  cloudBox.keySync.addEventListener("change", function () {
+    cloudKeyHintSticky = false;
+    if (cloudBox.keySync.checked) {
+      if (!storageGet(KEYS.cloudKek)) {
+        // Signed in before this existed, so the password was never used to make the encrypting key.
+        cloudBox.keySync.checked = false;
+        cloudKeyHintSticky = true;
+        cloudBox.keyHint.textContent = "To turn this on, sign out and sign in again. Your password is needed to encrypt the key, and it isn't kept after signing in.";
+        return;
+      }
+      cloudState.keySync = true;
+      cloudState.keyDeclined = false;
+      cloudState.keyRemove = false;
+    } else {
+      cloudState.keySync = false;
+      cloudState.keyRemove = true;   // take the encrypted copy out of the account; devices keep their own key
+    }
+    saveCloudState();
+    renderCloud();
+    cloudSync(true);
+  });
   cloudBox.signOut.addEventListener("click", cloudSignOut);
 
   document.addEventListener("visibilitychange", function () {

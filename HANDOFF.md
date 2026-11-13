@@ -40,7 +40,7 @@ Features, roughly in the order they were built:
 
 ## State of `main`
 
-- Service worker cache: `orc-shell-v25`. Bump it on every shell change.
+- Service worker cache: `orc-shell-v26`. Bump it on every shell change.
 - Tests: `tests/e2e.mjs`, about 275 named checks, all passing in November
   2026 after the account, sync and resilience work (see below).
   Run as described in `tests/README.md` (serve the repo on port 8765; the
@@ -97,8 +97,12 @@ Features, roughly in the order they were built:
   The "Permission denied" was Android refusing a shared `.json` file. This
   and the text-selection CSS could not be tried on a real phone from the
   sandbox: the owner's phone is the test.
-- Profiles sync as well (one `~profiles` record). Not synced: the key, the
-  current system prompt outside a profile, images.
+- Profiles sync as well (one `~profiles` record). The OpenRouter key syncs
+  only if opted in, encrypted with a password-derived key (`~key` record).
+  Not synced: the current system prompt outside a profile, images.
+- Interrupted replies can be continued or regenerated with versions kept.
+- Parked: running requests server-side (Skapi request forwarding) so a
+  reply survives backgrounding. Unprobed; the owner chose to hold off.
 - The site now lives at https://starship-whisperer.com/openrouter-claude/;
   the github.io address redirects there.
 

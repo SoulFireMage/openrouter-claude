@@ -17,7 +17,9 @@ just static files.
   requests to OpenRouter. Signed in (settings, "Account and sync"), your chats
   are also stored in a private [Skapi](https://www.skapi.com) table that only
   your account can read, so they follow you between devices, along with
-  your profiles. The API key and generated images are never uploaded.
+  your profiles. Generated images are never uploaded. The API key is not
+  uploaded either, unless you tick "Also sync my OpenRouter key", in which
+  case only an encrypted copy is.
 - If `localStorage` isn't available for some reason (private browsing, a
   restrictive embedded browser, etc.), the app falls back to holding your key
   and history in memory for that session instead of breaking.
@@ -49,6 +51,16 @@ just static files.
   all leave every chat on the device. Profiles sync too, default star
   included: the most recently edited copy of each wins, and deleting one
   deletes it everywhere. The Skapi library is only loaded once you sign in.
+- Optional encrypted key sync. Tick "Also sync my OpenRouter key, encrypted
+  with my password" (off by default) and a new device gets the key just by
+  signing in. The key is encrypted in the browser (PBKDF2-SHA256 with
+  310,000 rounds, then AES-GCM) with a key derived from your account
+  password, so the account only ever holds ciphertext. A key changed on one
+  device follows to the others. After a password reset the stored copy can
+  no longer be read: type the key in once more. Unticking removes the
+  encrypted copy from the account; "Forget API key" on a device sticks.
+  Its strength is your password's, so use a good one, and set a credit
+  limit on the key at OpenRouter regardless.
 - Export and import: the chats drawer writes every chat and profile to one
   JSON file (never the API key), with a Share button on phones that support
   it. The drawer's Export, Share and Import buttons stay on screen however
@@ -207,7 +219,6 @@ only when signing in). Licences are alongside the files.
 
 ## Ideas for later
 
-- Optionally sync the OpenRouter key, encrypted with the account password.
 - Client-side encryption of synced chats (Skapi supports it, at the cost of a
   recovery code to look after).
 - Streamed previews for the image models that support them.

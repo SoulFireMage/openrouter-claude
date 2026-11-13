@@ -44,7 +44,15 @@ phone, so every change ships as a PR that is merged to `main`, which deploys.
   The merge rules are listed at the top of that block: keep them
   loss-free. Profiles travel as one record (unique id ending `~profiles`,
   `kind: "profiles"`): newest copy of each profile wins, deletes are listed
-  in `gone`. The key and images are never uploaded.
+  in `gone`. Images are never uploaded.
+- The OpenRouter key is uploaded only if the user ticks the box, and then
+  only as AES-GCM ciphertext (record ending `~key`, `kind: "key"`). The
+  encrypting key is derived from the account password at sign-in
+  (`cloudDeriveKek`) and kept on the device as `orc_cloud_kek`; the
+  password itself is never stored. Never upload the key in the clear, and
+  never log it or the derived key. `keyPrint` in `orc_cloud_state` decides
+  direction: a key changed here goes up, a key changed elsewhere comes
+  down only if this device's is unchanged since the last sync.
 
 ## Things that bite
 
@@ -98,7 +106,9 @@ phone, so every change ships as a PR that is merged to `main`, which deploys.
 catalogue), `orc_image_opts` (per-model image options), `orc_cloud_user`
 (`{ id, email, expired? }` while signed in) and `orc_cloud_state` (sync
 bookkeeping: cursor, per-chat synced stamps, pending deletes, last synced
-profiles and deleted profile ids). Legacy keys cleaned up on load:
+profiles and deleted profile ids, key-sync flags and fingerprint) and
+`orc_cloud_kek` (the password-derived encrypting key, removed on sign-out).
+Legacy keys cleaned up on load:
 `orc_history` (migrated into a chat) and `orc_aa_key`, `orc_aa_cache`,
 `orc_aa_attempt` (from the abandoned per-device Artificial Analysis key).
 

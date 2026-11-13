@@ -1754,6 +1754,94 @@ lp = await localProfiles();
 check("profiles: import brings profiles to a fresh device", lp.length === 2 && lp.filter(p => p.isDefault).length === 0 && lp[1].systemPrompt === "prompt of Imported two" && (await page.textContent("#transfer-status")).includes("2 profiles"), JSON.stringify(lp.map(p => [p.name, p.isDefault])));
 await page.click("#chats-overlay", { position: { x: 380, y: 400 } });
 
+// ---------- Encrypted key sync (opt-in) ----------
+const keyRecord = async () => ((await remoteDb()).records.find(r => r.user_id === "user-2" && r.data.kind === "key") || { data: null }).data;
+const waitKey = (pred) => page.waitForFunction((src) => { const r = JSON.parse(localStorage.getItem("__skapi_db")).records.find(r => r.user_id === "user-2" && r.data.kind === "key"); return new Function("d", "return " + src)(r ? r.data : null); }, pred, { timeout: 15000 });
+const localKey = () => page.evaluate(() => localStorage.getItem("orc_api_key"));
+await putDevice(baseDevice);
+await signIn("richard@example.com", "secret-three");
+await synced();
+check("key: nothing about the key is uploaded unless asked", (await keyRecord()) === null && !(await page.$eval("#cloud-key-sync", e => e.checked)) && (await page.textContent("#cloud-key-hint")).startsWith("Off"));
+const kek = await page.evaluate(() => localStorage.getItem("orc_cloud_kek"));
+check("key: the password is not kept, only a key derived from it", !!kek && kek.length === 44 && !JSON.stringify(await takeDevice()).includes("secret-three"));
+await page.check("#cloud-key-sync");
+await waitKey("d && typeof d.ct === 'string'");
+await synced();
+let kr = await keyRecord();
+check("key: ticking the box uploads only ciphertext", typeof kr.iv === "string" && typeof kr.ct === "string" && !kr.removed && !JSON.stringify(await remoteDb()).includes("sk-or-v1") && !JSON.stringify(kr).includes(kek) && (await remoteDb()).records.find(r => r.data.kind === "key").unique_id === "orc:user-2:~key", JSON.stringify(kr));
+check("key: the status says so", (await cloudStatus()).includes("encrypted key uploaded") && (await page.textContent("#cloud-key-hint")).startsWith("On."), await cloudStatus());
+const keyDevice1 = await takeDevice();
+
+// A new device with no key: signing in is enough.
+await putDevice({ orc_model: "anthropic/claude-sonnet-4" });
+check("key: a fresh device starts without a key", (await localKey()) === null && await page.$eval("#composer", e => e.disabled));
+await signIn("richard@example.com", "secret-three");
+await synced();
+check("key: signing in on a new device brings the key", (await localKey()) === "sk-or-v1-test" && !(await page.$eval("#composer", e => e.disabled)) && (await cloudStatus()).includes("OpenRouter key received") && await page.$eval("#cloud-key-sync", e => e.checked) && (await page.$eval("#api-key", e => e.value)) === "sk-or-v1-test", await cloudStatus());
+
+// Changing the key here reaches the other device, which had not changed its own.
+const firstCt = (await keyRecord()).ct;
+await page.fill("#api-key", "sk-or-v1-rotated");
+await page.click("#save-settings");
+await waitKey("d && d.ct !== " + JSON.stringify(firstCt));
+check("key: a changed key is uploaded, still as ciphertext", !JSON.stringify(await remoteDb()).includes("sk-or-v1"));
+const keyDevice2 = await takeDevice();
+await putDevice(keyDevice1);
+await page.waitForFunction(() => localStorage.getItem("orc_api_key") === "sk-or-v1-rotated", null, { timeout: 15000 });
+check("key: the other device takes up the changed key", (await localKey()) === "sk-or-v1-rotated");
+
+// Forgetting the key on a device sticks, and does not remove it elsewhere.
+await synced();
+await openSettings();
+await page.click("#forget-key");
+await syncNow();
+check("key: a forgotten key does not come back by itself", (await localKey()) === null && !(await page.$eval("#cloud-key-sync", e => e.checked)) && !(await keyRecord()).removed);
+await page.check("#cloud-key-sync");
+await page.waitForFunction(() => localStorage.getItem("orc_api_key") === "sk-or-v1-rotated", null, { timeout: 15000 });
+check("key: ticking the box again brings it back", (await localKey()) === "sk-or-v1-rotated");
+
+// After a password reset the old copy can't be read; nothing breaks, and a fresh upload fixes it.
+await synced();
+await page.evaluate(() => { const db = JSON.parse(localStorage.getItem("__skapi_db")); db.users["richard@example.com"].password = "secret-four"; localStorage.setItem("__skapi_db", JSON.stringify(db)); });
+await putDevice({ orc_model: "anthropic/claude-sonnet-4" });
+await signIn("richard@example.com", "secret-four");
+await synced();
+check("key: a copy encrypted with an old password is reported, not adopted", (await localKey()) === null && (await cloudStatus()).includes("earlier password") && await page.$eval("#cloud-status", e => e.classList.contains("error")), await cloudStatus());
+await page.fill("#api-key", "sk-or-v1-retyped");
+await page.dispatchEvent("#api-key", "change");
+await page.click("#save-settings");
+await openSettings();
+const staleCt = (await keyRecord()).ct;
+await page.check("#cloud-key-sync");
+await waitKey("d && d.ct !== " + JSON.stringify(staleCt));
+await synced();
+await putDevice({ orc_model: "anthropic/claude-sonnet-4" });
+await signIn("richard@example.com", "secret-four");
+await synced();
+check("key: re-entering it uploads a copy the new password can read", (await localKey()) === "sk-or-v1-retyped");
+
+// Turning it off removes the encrypted copy from the account and keeps the key here.
+await page.uncheck("#cloud-key-sync");
+await waitKey("d && d.removed === true");
+await synced();
+kr = await keyRecord();
+check("key: turning it off removes the copy from the account, not from the device", kr.removed === true && kr.ct === undefined && (await localKey()) === "sk-or-v1-retyped" && (await cloudStatus()).includes("removed from your account"), JSON.stringify(kr));
+await putDevice({ orc_model: "anthropic/claude-sonnet-4" });
+await signIn("richard@example.com", "secret-four");
+await synced();
+check("key: once removed, a new device gets no key", (await localKey()) === null && !(await page.$eval("#cloud-key-sync", e => e.checked)));
+
+// A session from before this feature has no derived key: the box explains instead of half-working.
+await page.evaluate(() => localStorage.removeItem("orc_cloud_kek"));
+await page.reload({ waitUntil: "load" });
+await synced();
+await openSettings();
+await page.click("#cloud-key-sync");
+check("key: an older session is asked to sign in again before it can be turned on", !(await page.$eval("#cloud-key-sync", e => e.checked)) && (await page.textContent("#cloud-key-hint")).includes("sign out and sign in again") && (await keyRecord()).removed === true);
+await page.click("#cloud-sign-out");
+await page.waitForFunction(() => /^Signed out/.test(document.getElementById("cloud-status").textContent));
+check("key: signing out forgets the derived key", (await page.evaluate(() => localStorage.getItem("orc_cloud_kek"))) === null);
+
 // The real library: vendored, loaded only when someone signs in, and
 // reported cleanly when it can't reach its server.
 const offline = await browser.newContext({ viewport: { width: 390, height: 780 } });
