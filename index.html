@@ -226,6 +226,42 @@
 
   .msg-actions .meta { margin-top: 0; flex: 1; min-width: 0; }
 
+  /* Remove on every turn; Regenerate and Edit on the last exchange only. */
+  .act-btn {
+    background: none;
+    border: 1px solid transparent;
+    color: inherit;
+    opacity: 0.65;
+    padding: 2px 6px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 15px;
+    line-height: 1.2;
+    font-family: inherit;
+    flex: none;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .act-btn:active { opacity: 1; background: rgba(255, 255, 255, 0.08); }
+
+  /* The key is hidden like a password without being a password field:
+     browsers offer to save or "update" a password for any of those, and
+     this is not the account password. */
+  #api-key { -webkit-text-security: disc; }
+
+  #edit-bar {
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 6px 12px;
+    font-size: 12px;
+    color: var(--text-muted);
+    border-top: 1px solid var(--border);
+    background: var(--surface);
+  }
+  #edit-bar[hidden] { display: none; }
+
   .copy-btn {
     background: none;
     border: 1px solid transparent;
@@ -1038,6 +1074,11 @@
 
 <div id="image-options" hidden></div>
 
+<div id="edit-bar" hidden>
+  <span>Editing your last message. Sending replaces it and its reply.</span>
+  <button type="button" class="link-btn" id="edit-cancel">Cancel</button>
+</div>
+
 <div id="input-bar">
   <textarea id="composer" rows="1" placeholder="Message…" disabled></textarea>
   <button id="send-btn" disabled aria-label="Send">
@@ -1119,7 +1160,7 @@
 
     <div class="field">
       <label for="api-key">OpenRouter API key</label>
-      <input type="password" id="api-key" placeholder="sk-or-v1-…" autocomplete="off" autocapitalize="off" spellcheck="false">
+      <input type="text" id="api-key" placeholder="sk-or-v1-…" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
       <div class="hint">Stored only on this device. Get a key at <a href="https://openrouter.ai/settings/keys" target="_blank" rel="noopener">openrouter.ai/settings/keys</a>.</div>
     </div>
 
@@ -1259,7 +1300,7 @@
   var OPENROUTER = "https://openrouter.ai/api/v1";
   // Shown in settings so it is plain which build a device is running. Keep
   // it equal to the number in sw.js's CACHE_NAME (a test checks this).
-  var APP_VERSION = 29;
+  var APP_VERSION = 30;
   var APP_TITLE = "OpenRouter Chat";
 
   /* ---------------- Storage: localStorage with in-memory fallback ---------------- */
@@ -1700,6 +1741,7 @@
   function appendMessageEl(m) {
     var el = document.createElement("div");
     el.className = "msg " + m.role;
+    el._entry = m;
     if (m.role === "assistant") {
       el.innerHTML = renderMarkdown(m.content);
       decorateCodeBlocks(el);
@@ -1717,10 +1759,106 @@
       actions.appendChild(metaEl);
       if (Array.isArray(m.versions) && m.versions.length > 1) actions.appendChild(buildVersionSwitch(m));
       if (m.content) actions.appendChild(makeCopyButton("Copy message", function () { return m.content; }));
+      var remove = makeActButton("\u00d7", "Remove this message", function () { removeMessage(m); });
+      remove.classList.add("act-remove");
+      actions.appendChild(remove);
       el.appendChild(actions);
     }
     messagesEl.appendChild(el);
     return el;
+  }
+
+  /* ---------------- Changing what was said ----------------
+     Any one turn can be removed. The last exchange can also be redone:
+     Regenerate asks again with whichever model is chosen now (the replaced
+     reply is kept as an earlier version), and Edit puts your last message
+     back in the composer, where sending replaces it and its reply.
+     Earlier turns can't be edited: every later reply was written in answer
+     to them. */
+  var editBar = document.getElementById("edit-bar");
+  var editing = null;   // the user entry being edited, while the edit bar shows
+
+  function makeActButton(glyph, label, onClick) {
+    var btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "act-btn";
+    btn.textContent = glyph;
+    btn.title = label;
+    btn.setAttribute("aria-label", label);
+    btn.addEventListener("click", onClick);
+    return btn;
+  }
+
+  // Puts Regenerate and Edit on the last exchange, and nowhere else.
+  function refreshTailActions() {
+    var old = messagesEl.querySelectorAll(".tail-act");
+    for (var i = 0; i < old.length; i++) old[i].remove();
+    if (isStreaming || !history.length) return;
+    var last = history[history.length - 1];
+    var prev = history[history.length - 2];
+    var els = messagesEl.querySelectorAll(".msg.user, .msg.assistant");
+    var add = function (m, glyph, label, onClick) {
+      for (var j = els.length - 1; j >= 0; j--) {
+        if (els[j]._entry !== m) continue;
+        var row = els[j].querySelector(".msg-actions");
+        if (!row) return;
+        var btn = makeActButton(glyph, label, onClick);
+        btn.classList.add("tail-act");
+        row.insertBefore(btn, row.querySelector(".act-remove"));
+        return;
+      }
+    };
+    // A cut-off reply has its own Continue and Regenerate below it.
+    if (last.role === "assistant" && !last.interrupted && prev && prev.role === "user") {
+      add(last, "\u21bb", "Regenerate this reply with the current model", function () { redoLast("regenerate"); });
+    }
+    var lastUser = last.role === "user" ? last : (prev && prev.role === "user" ? prev : null);
+    if (lastUser) add(lastUser, "\u270e", "Edit this message and resend", function () { startEdit(lastUser); });
+  }
+
+  function startEdit(m) {
+    if (isStreaming || history.indexOf(m) === -1) return;
+    editing = m;
+    editBar.hidden = false;
+    composerEl.value = m.content;
+    composerEl.dispatchEvent(new Event("input"));
+    composerEl.focus();
+  }
+
+  function cancelEdit(keepText) {
+    if (!editing) return;
+    editing = null;
+    editBar.hidden = true;
+    if (!keepText) {
+      composerEl.value = "";
+      composerEl.dispatchEvent(new Event("input"));
+    }
+  }
+  document.getElementById("edit-cancel").addEventListener("click", function () { cancelEdit(false); });
+
+  // Called as an edited message is sent: takes the old message and its
+  // reply out of the chat. False if the chat has changed under the edit.
+  function applyEdit() {
+    var at = history.indexOf(editing);
+    var ok = at !== -1 && at >= history.length - 2 && history.slice(at + 1).every(function (m) { return m.role === "assistant"; });
+    editing = null;
+    editBar.hidden = true;
+    if (!ok) return false;
+    history.splice(at);
+    return true;
+  }
+
+  function removeMessage(m) {
+    if (isStreaming) return;
+    var at = history.indexOf(m);
+    if (at === -1) return;
+    if (history.length === 1) { deleteChat(currentChatId); return; }   // the chat would be empty
+    var what = m.role === "user" ? "your message" : "this reply";
+    if (!confirm("Remove " + what + " from the chat? This can't be undone.")) return;
+    if (editing) cancelEdit(false);
+    history.splice(at, 1);
+    if (persistHistory()) imagePruneChat(currentChatId);   // only once the chat without it is stored
+    renderHistory();
   }
 
   function showError(message, canRetry) {
@@ -1805,7 +1943,10 @@
   function redoLast(mode) {
     if (isStreaming) return;
     var last = history[history.length - 1];
-    if (!last || last.role !== "assistant" || !last.interrupted) return;
+    var asked = history[history.length - 2];
+    if (!last || last.role !== "assistant" || !asked || asked.role !== "user") return;
+    if (mode === "continue" && !last.interrupted) return;
+    if (editing) cancelEdit(false);
     // Without a key or model nothing can be sent, and the reply must not be
     // taken off for a request that never starts.
     if (!storageGet(KEYS.apiKey) || !storageGet(KEYS.model)) { updateComposerEnabled(); return; }
@@ -1840,6 +1981,7 @@
     } else if (lastMessage.interrupted) {
       showInterrupted();
     }
+    refreshTailActions();
     scrollToBottom(true);
   }
 
@@ -1867,6 +2009,7 @@
       showError("This device's storage is full, so this chat isn't being saved. Delete some old chats to make room.", false);
     }
     cloudTouch();
+    return ok;
   }
 
   /* ---------------- Chats ---------------- */
@@ -1961,6 +2104,7 @@
   function switchChat(id) {
     if (id === currentChatId) { closeChats(); return; }
     if (currentAbort) currentAbort.abort();
+    cancelEdit(false);
     currentChatId = id;
     history = loadChat(id);
     storageSet(KEYS.currentChat, id);
@@ -1971,6 +2115,7 @@
 
   function startNewChat() {
     if (currentAbort) currentAbort.abort();
+    cancelEdit(false);
     currentChatId = null;
     history = [];
     storageRemove(KEYS.currentChat);
@@ -2312,6 +2457,7 @@
     sendBtn.classList.toggle("stop", on);
     sendBtn.setAttribute("aria-label", on ? "Stop" : "Send");
     updateComposerEnabled();
+    refreshTailActions();
   }
 
   /* ---------------- Profiles ----------------
@@ -3106,8 +3252,16 @@
     return used;
   }
 
-  async function imageDeleteChat(chatId) {
-    var keep = imagesUsedElsewhere(chatId);
+  // After a message is removed or replaced: drops this chat's pictures that
+  // no message, in this chat or any other, shows any more.
+  function imagePruneChat(chatId) {
+    if (!chatId) return Promise.resolve();
+    return imageDeleteChat(chatId, true);
+  }
+
+  // onlyOrphans: keep the pictures this chat's own messages still show.
+  async function imageDeleteChat(chatId, onlyOrphans) {
+    var keep = imagesUsedElsewhere(onlyOrphans ? null : chatId);
     Object.keys(memImages).forEach(function (k) { if (memImages[k].chatId === chatId && !keep[k]) delete memImages[k]; });
     var db = await imgDb();
     if (!db) return;
@@ -3305,7 +3459,7 @@
       if (!meta) return;
       var other = loadChat(sendChatId);
       var tail = other[other.length - 1];
-      if (replaceTail && tail && tail.role === "assistant" && tail.interrupted) other.pop();
+      if (replaceTail && tail && tail.role === "assistant") other.pop();
       other.push(entry);
       if (!saveChat(sendChatId, other)) return;
       meta.updated = Date.now();
@@ -3316,7 +3470,10 @@
     }
   }
 
-  async function generateImage(prompt, model, key, sendChatId) {
+  // redo and restorePrior are set when this replaces the last reply: the
+  // new image is filed as a further version of it, and on any failure the
+  // replaced reply is put back.
+  async function generateImage(prompt, model, key, sendChatId, redo, restorePrior) {
     var body = { model: model, prompt: prompt };
     var opts = imageRequestOptions();
     Object.keys(opts).forEach(function (k) { body[k] = opts[k]; });
@@ -3369,12 +3526,14 @@
       }
       if (!refs.length) throw new Error("the model returned no images");
       requestPersistentStorage();
-      fileReply({
+      var made = {
         role: "assistant", content: "", images: refs, model: model, requested: model,
         usage: json.usage && typeof json.usage === "object" ? json.usage : null,
         timing: { total: Math.round(performance.now() - tStart) },
         refined: !!body.input_references
-      }, sendChatId, placeholder);
+      };
+      if (redo) carryVersions(made, redo);
+      fileReply(made, sendChatId, placeholder, !!redo);
       if (!allSaved && !imgStorageWarned) {
         imgStorageWarned = true;
         showError("This device couldn't store the image, so it will be lost when the app closes. Open it and tap Save to keep it.", false);
@@ -3382,11 +3541,12 @@
     } catch (err) {
       if (currentChatId === sendChatId) {
         placeholder.remove();
+        if (redo && restorePrior) restorePrior();
         showError(err && err.name === "AbortError"
           ? "Stopped. A cancelled image isn't billed."
           : err instanceof TypeError
             ? "The connection dropped while the image was being made, which usually means the app went into the background. It may still have been generated and billed, so check your OpenRouter activity before retrying."
-            : "Image generation failed: " + (err && err.message ? err.message : "unknown error"), true);
+            : "Image generation failed: " + (err && err.message ? err.message : "unknown error"), !redo);
       }
     } finally {
       clearInterval(timer);
@@ -3587,6 +3747,22 @@
   // redo: { mode: "continue" | "regenerate", prior: the cut-off reply }, set
   // by redoLast(). The prior reply has been taken off `history` in memory
   // only; it is put back if no replacement arrives.
+  // Gives a redone reply the versions of the one it replaces: a
+  // continuation takes the place of the version it continued, a
+  // regeneration is added after the ones already kept.
+  function carryVersions(entry, redo) {
+    var prior = redo.prior;
+    var versions = Array.isArray(prior.versions) && prior.versions.length ? prior.versions.slice() : [versionOf(prior)];
+    var at = typeof prior.v === "number" && versions[prior.v] ? prior.v : versions.length - 1;
+    if (redo.mode === "continue") {
+      versions[at] = versionOf(entry);          // the same version, now longer
+    } else {
+      versions.push(versionOf(entry));          // a new version; the replaced one stays
+      at = versions.length - 1;
+    }
+    if (versions.length > 1) { entry.versions = versions; entry.v = at; }
+  }
+
   async function sendMessage(retrying, redo) {
     if (isStreaming) return;
 
@@ -3610,9 +3786,25 @@
     removeTransient();
 
     if (!retrying) {
-      history.push({ role: "user", content: text });
-      persistHistory();
-      appendMessageEl({ role: "user", content: text });
+      // An edited message replaces the old one and the reply it got. If
+      // the chat changed under the edit (a sync brought in another copy),
+      // nothing is sent: the text would land as a new turn beside the
+      // message it was meant to replace.
+      var edited = !!editing;
+      if (edited) {
+        if (!applyEdit()) {
+          showError("This chat changed while you were editing, so nothing was sent. Your text is still in the box: look over the chat, then send it or edit again.", false);
+          return;
+        }
+        renderHistory();
+        removeTransient();
+      }
+      var mine = { role: "user", content: text };
+      history.push(mine);
+      // Pictures of the replaced reply go only once the chat without them
+      // is safely stored; if that failed, the stored copy still shows them.
+      if (persistHistory() && edited) imagePruneChat(currentChatId);
+      appendMessageEl(mine);
       composerEl.value = "";
       composerEl.style.height = "auto";
       scrollToBottom(true);
@@ -3621,6 +3813,7 @@
     var apiMessages = buildApiMessages();
     var sendChatId = currentChatId;   // the chat this reply belongs to, even if the user switches away
     var base = redo && redo.mode === "continue" ? redo.prior.content : "";   // text a continuation is added to
+    var stillHere = redo && redo.mode === "continue" ? "The earlier part is still here." : "The earlier reply is still here.";
 
     function restorePrior() {
       if (!redo || currentChatId !== sendChatId) return;
@@ -3629,8 +3822,10 @@
     }
 
     if (isImageModel(model)) {
-      if (redo) { restorePrior(); return; }   // an image model can't take over a text reply
-      await generateImage(text, model, key, sendChatId);
+      // A cut-off text reply can't be continued by an image model, but any
+      // reply can be regenerated by one: the old reply stays as a version.
+      if (redo && redo.mode === "continue") { restorePrior(); return; }
+      await generateImage(text, model, key, sendChatId, redo, restorePrior);
       return;
     }
     if (base) apiMessages.push({ role: "assistant", content: base }, { role: "user", content: CONTINUE_NOTE });
@@ -3682,19 +3877,8 @@
     function finish(entry) {
       entry.timing = timing();
       if (renderTimer) { clearTimeout(renderTimer); renderTimer = null; }
-      if (redo) {
-        var prior = redo.prior;
-        var versions = Array.isArray(prior.versions) && prior.versions.length ? prior.versions.slice() : [versionOf(prior)];
-        var at = typeof prior.v === "number" && versions[prior.v] ? prior.v : versions.length - 1;
-        if (redo.mode === "continue") {
-          versions[at] = versionOf(entry);          // the same version, now longer
-        } else {
-          versions.push(versionOf(entry));          // a new version; the cut-off one stays
-          at = versions.length - 1;
-        }
-        if (versions.length > 1) { entry.versions = versions; entry.v = at; }
-      }
-      // If the user has moved to another chat, the cut-off reply is still
+      if (redo) carryVersions(entry, redo);
+      // If the user has moved to another chat, the replaced reply is still
       // the last thing stored in this one; fileReply swaps it out.
       fileReply(entry, sendChatId, assistantEl, !!redo);
     }
@@ -3819,7 +4003,7 @@
       if (currentChatId !== sendChatId) return;
       assistantEl.remove();
       restorePrior();
-      showError(redo ? "Stopped before anything more arrived. The earlier part is still here." : "Stopped before any reply arrived.", !redo);
+      showError(redo ? "Stopped before anything more arrived. " + stillHere : "Stopped before any reply arrived.", !redo);
     }
 
     try {
@@ -3862,7 +4046,7 @@
             restorePrior();
             var why = err && err.message ? err.message : "unknown error";
             showError(dropped
-              ? "The connection dropped and couldn't be restored (" + why + "). " + (redo ? "The earlier part is still here." : "Your message is saved; retry when you're back online.")
+              ? "The connection dropped and couldn't be restored (" + why + "). " + (redo ? stillHere : "Your message is saved; retry when you're back online.")
               : "Request failed: " + why, !redo);
           }
           break;
@@ -4713,6 +4897,11 @@
       if (dirty) { cloudSaw(d); return "kept"; }
       return cloudStore(d, remote) ? "pulled" : "full";
     }
+    // The account still holds the revision this device last saw, so what
+    // differs is a change made here (a message removed, edited or
+    // regenerated): it goes up as it is. Without this, a chat made shorter
+    // here would be "the shorter side" and the removal undone.
+    if (dirty && hasOwn(cloudState.rev, id) && d.updated === cloudState.rev[id] && cloudSawMine(d)) return "kept";
     // Unchanged here since the last sync, and the writer had seen this
     // device's last upload: the account's copy simply replaces it.
     var overwritten = !dirty && !cloudSawMine(d);
@@ -5704,7 +5893,10 @@
     var say = function (text) { versionText.textContent = "Version " + APP_VERSION + ". " + text; };
     say("Checking…");
     try {
-      var res = await fetch("sw.js", { cache: "no-store" });
+      // The query string makes this a request no cache has an answer for:
+      // an older service worker, still in charge until the update, would
+      // otherwise serve its own stored sw.js and report "the latest".
+      var res = await fetch("sw.js?check=" + Date.now(), { cache: "no-store" });
       var match = /orc-shell-v(\d+)/.exec(await res.text());
       var latest = match ? Number(match[1]) : 0;
       if (!res.ok || !latest) throw new Error("no version found");

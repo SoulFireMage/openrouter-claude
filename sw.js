@@ -1,5 +1,5 @@
 // Bump this when you change index.html/manifest/icon so clients pick up the new shell.
-const CACHE_NAME = "orc-shell-v29";
+const CACHE_NAME = "orc-shell-v30";
 
 const SHELL_FILES = [
   "./",
@@ -64,6 +64,12 @@ self.addEventListener("fetch", function (event) {
 
   // Only handle simple same-origin GETs for the app shell; let everything else pass through.
   if (event.request.method !== "GET") {
+    return;
+  }
+
+  // The update check reads sw.js to learn the newest version. Answering
+  // that from the cache would always report the version already installed.
+  if (event.request.cache === "no-store" || url.pathname.endsWith("/sw.js")) {
     return;
   }
 

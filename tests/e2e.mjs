@@ -1999,6 +1999,16 @@ check("version: the build number is shown and matches the service worker cache",
 await page.click("#version-check");
 await page.waitForFunction(() => /latest/.test(document.getElementById("version-text").textContent));
 check("version: checking for an update reports when this is the latest", (await page.textContent("#version-text")) === "Version " + swVersion + ". This is the latest.");
+// A copy of sw.js left in the cache must not answer the check. This one
+// claims a far newer version: believing it would start an update.
+await page.evaluate(async (v) => {
+  const cache = await caches.open("orc-shell-v" + v);
+  await cache.put(new URL("sw.js", location.href).href, new Response('const CACHE_NAME = "orc-shell-v999";', { headers: { "Content-Type": "text/javascript" } }));
+}, swVersion);
+await page.click("#version-check");
+await page.waitForFunction(() => /latest|available|Couldn't/.test(document.getElementById("version-text").textContent) && !document.getElementById("version-check").disabled);
+check("version: the check reads the live file, not a cached copy", (await page.textContent("#version-text")) === "Version " + swVersion + ". This is the latest.", await page.textContent("#version-text"));
+check("key field: hidden like a password without being a password field", (await page.$eval("#api-key", e => e.type)) === "text" && (await page.$eval("#api-key", e => getComputedStyle(e).webkitTextSecurity)) === "disc");
 await page.click("#save-settings");
 
 // The real library: vendored, loaded only when someone signs in, and
@@ -2335,6 +2345,161 @@ await page.click("#save-settings");
 await openChatList();
 check("large: it is marked as not in the account", (await marks()).noise === "↑", JSON.stringify(await marks()));
 await closeChatList();
+await putDevice(dev({}));
+await page.evaluate(() => localStorage.removeItem("__skapiFake"));
+
+// ---------- Changing what was said: regenerate, edit, remove ----------
+await page.evaluate(() => { localStorage.removeItem("__skapiFake"); localStorage.setItem("__imgMode", "on"); });
+await putDevice(dev({}));
+await page.waitForFunction(() => (localStorage.getItem("orc_image_models") || "").includes("acme/pixel-1"), null, { timeout: 15000 });
+const tailOf = () => page.$$eval(".msg.user, .msg.assistant", els => els.map(e => ({
+  role: e.classList.contains("user") ? "user" : "assistant",
+  regen: !!e.querySelector('.act-btn[aria-label^="Regenerate"]'),
+  edit: !!e.querySelector('.act-btn[aria-label^="Edit"]'),
+  remove: !!e.querySelector(".act-remove")
+})));
+const clickAct = (role, label) => page.evaluate(([role, label]) => {
+  const els = [...document.querySelectorAll(".msg." + role)];
+  els[els.length - 1].querySelector('.act-btn[aria-label^="' + label + '"]').click();
+}, [role, label]);
+const setModel = async (id) => { await page.evaluate((id) => localStorage.setItem("orc_model", id), id); await page.reload({ waitUntil: "load" }); await page.waitForTimeout(300); };
+
+await page.evaluate(() => window.__scenarios.push({ kind: "ok", text: "first answer" }, { kind: "ok", text: "I can't draw, I'm a text model." }));
+await send("first question");
+await idle();
+await send("draw a fox");
+await idle();
+let tail = await tailOf();
+check("redo: the last reply offers Regenerate and the last message Edit", tail.length === 4 && tail[3].regen && !tail[3].edit && tail[2].edit && !tail[2].regen, JSON.stringify(tail));
+check("redo: earlier turns offer neither, and every turn can be removed", !tail[0].edit && !tail[0].regen && !tail[1].edit && !tail[1].regen && tail.every(t => t.remove), JSON.stringify(tail));
+
+// Regenerate with the same kind of model: a new version, the old one kept.
+await page.evaluate(() => window.__scenarios.push({ kind: "ok", text: "second try" }));
+await clickAct("assistant", "Regenerate");
+await idle();
+let chatNow = await curChat();
+check("redo: regenerate replaces the reply and keeps the old one as a version", chatNow.length === 4 && chatNow[3].content === "second try" && chatNow[3].versions.length === 2 && chatNow[3].versions[0].content.startsWith("I can't draw") && chatNow[3].v === 1, JSON.stringify(chatNow[3]));
+let lastReq = await page.evaluate(() => window.__requests[window.__requests.length - 1]);
+check("redo: the replaced reply is not sent back to the model", lastReq.messages[lastReq.messages.length - 1].content === "draw a fox" && !JSON.stringify(lastReq.messages).includes("I can't draw"), JSON.stringify(lastReq.messages));
+check("redo: the version switch shows 2/2", (await page.$$eval(".versions span", s => s[s.length - 1].textContent)) === "2/2");
+
+// The case that prompted this: the reply came from a text model, and an
+// image model should have answered. Switch model, regenerate.
+await setModel("acme/pixel-1");
+await clickAct("assistant", "Regenerate");
+await idle();
+chatNow = await curChat();
+const imgRedoReq = await page.evaluate(() => window.__imgRequests[window.__imgRequests.length - 1]);
+check("redo: an image model can replace a text reply", chatNow.length === 4 && chatNow[3].images.length === 1 && chatNow[3].model === "acme/pixel-1" && chatNow[3].versions.length === 3 && chatNow[3].v === 2 && imgRedoReq.prompt === "draw a fox", JSON.stringify(chatNow[3]));
+await page.click('.versions button[aria-label="Earlier version"]');
+check("redo: the text reply is still there as an earlier version", (await curChat())[3].content === "second try" && (await curChat())[3].v === 1);
+await page.click('.versions button[aria-label="Later version"]');
+
+// A regeneration that fails puts the replaced reply back.
+await page.evaluate(() => localStorage.setItem("__imgMode", "fail"));
+await clickAct("assistant", "Regenerate");
+await page.waitForSelector(".msg.error");
+await idle();
+chatNow = await curChat();
+check("redo: a failed regeneration leaves the reply as it was", chatNow.length === 4 && chatNow[3].versions.length === 3 && chatNow[3].images.length === 1 && (await page.textContent(".msg.error")).includes("Image generation failed") && (await page.$$(".msg.assistant")).length === 2, JSON.stringify(chatNow[3]));
+await page.evaluate(() => localStorage.setItem("__imgMode", "on"));
+
+// Edit: the message goes back to the composer; Cancel changes nothing.
+await clickAct("user", "Edit");
+check("edit: the last message is put in the composer with a notice", (await page.inputValue("#composer")) === "draw a fox" && !(await page.$eval("#edit-bar", e => e.hidden)));
+await page.click("#edit-cancel");
+check("edit: cancel leaves the chat untouched", (await page.inputValue("#composer")) === "" && (await page.$eval("#edit-bar", e => e.hidden)) && JSON.stringify(await curChat()) === JSON.stringify(chatNow));
+const imagesBeforeEdit = await idbCount();
+await clickAct("user", "Edit");
+await page.fill("#composer", "draw a wolf");
+await page.click("#send-btn");
+await idle();
+chatNow = await curChat();
+check("edit: sending replaces the message and its reply", chatNow.length === 4 && chatNow[2].content === "draw a wolf" && chatNow[3].images.length === 1 && !chatNow[3].versions && chatNow[0].content === "first question" && (await page.$eval("#edit-bar", e => e.hidden)), JSON.stringify(chatNow.map(m => m.content)));
+check("edit: the request carries the new text, not the old", (await page.evaluate(() => window.__imgRequests[window.__imgRequests.length - 1])).prompt === "draw a wolf");
+await page.waitForTimeout(300);
+check("edit: pictures of the replaced reply are cleared out", imagesBeforeEdit === 1 && (await idbCount()) === 1, imagesBeforeEdit + " -> " + (await idbCount()));
+
+// With storage full the edited chat can't be saved, so the stored copy
+// still shows the old reply: its picture must not be deleted.
+await page.evaluate(() => {
+  window.__realSetItem = Storage.prototype.setItem;
+  Storage.prototype.setItem = function (k, v) {
+    if (String(k).startsWith("orc_chat")) throw new DOMException("Quota exceeded", "QuotaExceededError");
+    return window.__realSetItem.call(this, k, v);
+  };
+});
+await clickAct("user", "Edit");
+await page.fill("#composer", "draw a bear");
+await page.click("#send-btn");
+await idle();
+await page.waitForTimeout(300);
+check("edit: with storage full the stored reply keeps its picture", (await idbCount()) === 2 && (await curChat())[2].content === "draw a wolf", String(await idbCount()));
+await page.evaluate(() => { Storage.prototype.setItem = window.__realSetItem; });
+await page.reload({ waitUntil: "load" });
+await page.waitForTimeout(300);
+
+// Remove: any one turn, here an earlier reply.
+await page.evaluate(() => document.querySelectorAll(".msg.assistant")[0].querySelector(".act-remove").click());
+chatNow = await curChat();
+check("remove: one turn is taken out and the rest stay", chatNow.length === 3 && JSON.stringify(chatNow.map(m => m.role)) === JSON.stringify(["user", "user", "assistant"]) && !JSON.stringify(chatNow).includes("first answer") && (await page.$$(".msg.assistant")).length === 1, JSON.stringify(chatNow.map(m => m.content)));
+await page.reload({ waitUntil: "load" });
+await page.waitForTimeout(300);
+check("remove: it stays removed after a reload", (await curChat()).length === 3 && (await page.$$(".msg.user")).length === 2);
+
+// Removing the only message removes the chat.
+await setModel("anthropic/claude-sonnet-4");
+await page.click("#open-chats");
+await page.click("#new-chat-btn");
+await page.evaluate(() => window.__scenarios.push({ kind: "http", status: 500, message: "boom" }));
+await send("lonely message");
+await page.waitForSelector(".msg.error .retry-btn");
+const chatsBeforeLone = (await chatIndex()).length;
+await page.evaluate(() => document.querySelector(".msg.user .act-remove").click());
+check("remove: removing the only message deletes the chat", (await chatIndex()).length === chatsBeforeLone - 1 && (await page.$$(".msg.user")).length === 0);
+await page.evaluate(() => localStorage.removeItem("__imgMode"));
+
+// Synced: a change made here goes up as it is. A chat made shorter must
+// not be "the shorter side" and have the removal undone, and a regenerated
+// reply must not be taken for a conflict.
+await page.evaluate(() => localStorage.setItem("__skapiFake", "1"));
+const EDITOR = "editor@example.com";
+await putDevice(dev({ t1: { messages: qa("t1 q", "t1 a", "t1 q2", "t1 a2"), updated: 1000 } }, { orc_current_chat: "t1" }));
+await signIn(EDITOR, "edit-pass", true);
+await synced();
+await page.click("#save-settings");
+await page.evaluate(() => { const els = document.querySelectorAll(".msg.assistant"); els[els.length - 1].querySelector(".act-remove").click(); });
+await page.waitForFunction((email) => { const db = JSON.parse(localStorage.getItem("__skapi_db")); const r = db.records.find(r => r.user_id === db.users[email].id && r.data.id === "t1"); return r && r.data.messages.length === 3; }, EDITOR, { timeout: 15000 });
+await page.waitForFunction(() => /^Synced at/.test(document.getElementById("cloud-status").textContent));
+check("sync: a removed reply stays removed and reaches the account", texts((await localChats()).t1) === "t1 q|t1 a|t1 q2" && texts((await remoteOf(EDITOR)).t1) === "t1 q|t1 a|t1 q2" && Object.keys(await localChats()).length === 1, JSON.stringify(await localChats()));
+await page.evaluate(() => window.__scenarios.push({ kind: "ok", text: "t1 a2 again" }, { kind: "ok", text: "t1 a2 third" }));
+await page.click(".msg.error .retry-btn");
+await idle();
+await clickAct("assistant", "Regenerate");
+await idle();
+await page.waitForFunction((email) => { const db = JSON.parse(localStorage.getItem("__skapi_db")); const r = db.records.find(r => r.user_id === db.users[email].id && r.data.id === "t1"); return r && r.data.messages.length === 4 && r.data.messages[3].content === "t1 a2 third"; }, EDITOR, { timeout: 15000 });
+await syncNow();
+check("sync: a regenerated reply is an update, not a conflict", Object.keys(await localChats()).length === 1 && texts((await localChats()).t1) === "t1 q|t1 a|t1 q2|t1 a2 third" && Object.keys(await remoteOf(EDITOR)).length === 1 && !(await cloudStatus()).includes("two places"), (await cloudStatus()) + JSON.stringify(Object.keys(await localChats())));
+await page.click("#save-settings");
+// The chat changes under an open edit (a sync brings in another device's
+// additions). Sending then must not add the text as a new turn.
+await clickAct("user", "Edit");
+await editRemote(EDITOR, "t1", "db.records[i].data.messages.push({ role: 'user', content: 't1 q3' }, { role: 'assistant', content: 't1 a3' }); db.records[i].data.updated = now; db.records[i].updated = now;");
+await page.evaluate(() => document.getElementById("cloud-sync-now").click());
+await page.waitForFunction(() => JSON.parse(localStorage.getItem("orc_chat_t1")).length === 6, null, { timeout: 15000 });
+const requestsBeforeStale = await page.evaluate(() => window.__requests.length);
+await page.fill("#composer", "edited too late");
+await page.click("#send-btn");
+await page.waitForSelector(".msg.error");
+check("edit: a chat changed under the edit sends nothing and keeps the text", (await page.textContent(".msg.error")).includes("changed while you were editing") && (await page.inputValue("#composer")) === "edited too late" && (await page.evaluate(() => window.__requests.length)) === requestsBeforeStale && texts((await localChats()).t1) === "t1 q|t1 a|t1 q2|t1 a2 third|t1 q3|t1 a3" && (await page.$eval("#edit-bar", e => e.hidden)), await page.textContent(".msg.error"));
+await page.fill("#composer", "");
+await page.waitForFunction(() => /^Synced at/.test(document.getElementById("cloud-status").textContent));
+// Another device, unchanged, simply takes the edited chat.
+const editorDevice = await takeDevice();
+await putDevice(dev({ t1: { messages: qa("t1 q", "t1 a", "t1 q2", "t1 a2"), updated: 1000 } }));
+await signIn(EDITOR, "edit-pass");
+await synced();
+check("sync: another device with the old copy keeps both rather than guessing", Object.values(await localChats()).map(texts).sort().join(" / ") === "t1 q|t1 a|t1 q2|t1 a2 / t1 q|t1 a|t1 q2|t1 a2 third|t1 q3|t1 a3", JSON.stringify(Object.values(await localChats()).map(texts)));
 await putDevice(dev({}));
 await page.evaluate(() => localStorage.removeItem("__skapiFake"));
 
