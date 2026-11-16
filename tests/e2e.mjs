@@ -12,6 +12,14 @@ const fakeFetch = () => {
   // contents when the app reads it at start, so after a reload it shows
   // what was really stored. __chatDump reads the database directly.
   window.__chats = {};
+  // "__lsFailKey": localStorage refuses writes to that one key, as when it is full.
+  if (localStorage.getItem("__lsFailKey")) {
+    const realSetItem = Storage.prototype.setItem;
+    Storage.prototype.setItem = function (k, v) {
+      if (this === localStorage && k === localStorage.getItem("__lsFailKey")) throw new DOMException("Quota exceeded", "QuotaExceededError");
+      return realSetItem.call(this, k, v);
+    };
+  }
   // "__idbDown": the app can't open its chat database (the helpers below still can).
   const realOpen = IDBFactory.prototype.open;
   if (localStorage.getItem("__idbDown")) {
@@ -28,6 +36,10 @@ const fakeFetch = () => {
         // "__quotaKey" (one chat) or __chatWritesFail (all): the write is refused, as when storage is full.
         if (window.__chatWritesFail || localStorage.getItem("__quotaKey") === "orc_chat_" + v.id) throw new DOMException("Quota exceeded", "QuotaExceededError");
         window.__chats[v.id] = v.json;
+        // "__raceChat" = { id, json }: while that chat is being written to the
+        // database, a tab on the previous version rewrites its old copy.
+        const race = JSON.parse(localStorage.getItem("__raceChat") || "null");
+        if (race && race.id === v.id) { localStorage.removeItem("__raceChat"); localStorage.setItem("orc_chat" + "_" + race.id, race.json); }
       }
       return realPut.call(this, v, ...rest);
     };
@@ -2552,6 +2564,12 @@ await putDevice(dev({ t1: { messages: qa("t1 q", "t1 a", "t1 q2", "t1 a2"), upda
 await signIn(EDITOR, "edit-pass");
 await synced();
 check("sync: another device with the old copy keeps both rather than guessing", Object.values(await localChats()).map(texts).sort().join(" / ") === "t1 q|t1 a|t1 q2|t1 a2 / t1 q|t1 a|t1 q2|t1 a2 third|t1 q3|t1 a3", JSON.stringify(Object.values(await localChats()).map(texts)));
+// A chat's write was refused and the app closed before it went through:
+// the next launch re-reads everything from the account.
+const afterRefusal = await takeDevice();
+await putDevice({ ...afterRefusal, orc_unsaved: JSON.stringify(["t1"]) });
+await page.waitForFunction(() => /^Synced at/.test(document.getElementById("cloud-status").textContent), null, { timeout: 15000 });
+check("unsaved: a refused write makes the next launch re-read the account", (await cloudStatus()).includes("Everything was checked") && (await page.evaluate(() => localStorage.getItem("orc_unsaved"))) === null, await cloudStatus());
 await putDevice(dev({}));
 await page.evaluate(() => localStorage.removeItem("__skapiFake"));
 
@@ -2620,13 +2638,67 @@ check("leftover: a longer copy from the old place replaces the stored one", (awa
 check("leftover: a diverged copy is kept beside the stored one", (await storedTexts("k2")) === "k2 q|k2 a" && !!recovered && (await storedTexts(recovered.id)) === "k2 q|a different k2 answer", JSON.stringify(mergedIndex.map(c => c.title)));
 check("leftover: a shorter copy changes nothing", (await storedTexts("k3")) === "k3 q|k3 a|k3 q2|k3 a2" && mergedIndex.length === 4);
 
+// Same text, different pictures: both replies have empty text, so only a
+// whole-message comparison can tell them apart. The old copy must be kept.
+const picA = [{ role: "user", content: "draw it" }, { role: "assistant", content: "", images: [{ id: "pic-a", type: "image/png" }] }];
+const picB = [{ role: "user", content: "draw it" }, { role: "assistant", content: "", images: [{ id: "pic-b", type: "image/png" }] }];
+await putDevice(dev({ p1: { messages: picA, updated: 1000 } }));
+await page.waitForFunction(() => localStorage.getItem("orc_store") === "idb");
+await plantOld("p1", picB);
+await page.reload({ waitUntil: "load" });
+await page.waitForFunction(() => !Object.keys(localStorage).some(k => k.startsWith("orc_chat_")), null, { timeout: 10000 });
+const picDump = await page.evaluate(() => window.__chatDump());
+const picCopy = (await chatIndex()).find(c => c.title === "p1 (recovered copy)");
+check("leftover: a copy differing only in its pictures is kept, not dropped", picDump.p1.includes("pic-a") && !!picCopy && picDump[picCopy.id].includes("pic-b"), JSON.stringify((await chatIndex()).map(c => c.title)));
+
+// The chat list can't be saved (localStorage is full): a copy kept as a
+// separate chat would then be a chat nothing points to. The old copy
+// stays put, and no such record is left behind.
+await putDevice(dev({ q1: { messages: qa("q1 q", "q1 a"), updated: 1000 } }));
+await page.waitForFunction(() => localStorage.getItem("orc_store") === "idb");
+await plantOld("q1", qa("q1 q", "another q1 answer"));
+await page.evaluate(() => localStorage.setItem("__lsFailKey", "orc_chats"));
+await page.reload({ waitUntil: "load" });
+await page.waitForFunction(() => document.querySelectorAll(".msg.assistant").length === 0 && !document.getElementById("composer").disabled);
+await page.waitForTimeout(300);
+check("leftover: if the chat list can't be saved the old copy stays", (await lsChatKeys()).length === 1 && Object.keys(await page.evaluate(() => window.__chatDump())).join() === "q1" && (await chatIndex()).length === 1, JSON.stringify(Object.keys(await page.evaluate(() => window.__chatDump()))));
+await page.evaluate(() => localStorage.removeItem("__lsFailKey"));
+await page.reload({ waitUntil: "load" });
+await page.waitForFunction(() => !Object.keys(localStorage).some(k => k.startsWith("orc_chat_")), null, { timeout: 10000 });
+check("leftover: and it is recovered on the next launch", (await chatIndex()).some(c => c.title === "q1 (recovered copy)") && Object.keys(await page.evaluate(() => window.__chatDump())).length === 2);
+
+// A tab on the previous version adds to a chat while it is being moved.
+// The old copy no longer reads as it did, so it is not removed, and the
+// newer text is picked up on the next launch.
+await page.evaluate(async (d) => {
+  Object.keys(localStorage).filter(k => k.startsWith("orc_")).forEach(k => localStorage.removeItem(k));
+  await window.__chatWipe();
+  for (const [k, v] of Object.entries(d)) localStorage.setItem(k, v);
+  localStorage.setItem("__raceChat", JSON.stringify({ id: "w1", json: JSON.stringify([{ role: "user", content: "w1 q" }, { role: "assistant", content: "w1 a" }, { role: "user", content: "w1 late q" }, { role: "assistant", content: "w1 late a" }]) }));
+}, dev({ w1: { messages: qa("w1 q", "w1 a"), updated: 1000 } }));
+await page.reload({ waitUntil: "load" });
+await page.waitForFunction(() => localStorage.getItem("orc_store") === "idb");
+await page.waitForTimeout(300);
+check("race: an old copy changed during the move is not removed", (await lsChatKeys()).join() === "orc_chat_w1" && (await storedTexts("w1")) === "w1 q|w1 a");
+await page.reload({ waitUntil: "load" });
+await page.waitForFunction(() => !Object.keys(localStorage).some(k => k.startsWith("orc_chat_")), null, { timeout: 10000 });
+check("race: the text added meanwhile arrives on the next launch", (await storedTexts("w1")) === "w1 q|w1 a|w1 late q|w1 late a");
+
 // The database won't open on a device that has moved. That must read as
 // an error, never as an empty app, and nothing may be written meanwhile.
+await putDevice(dev({ k1: { messages: qa("k1 q", "k1 a", "k1 later q", "k1 later a"), updated: 1000 }, k3: { messages: qa("k3 q", "k3 a"), updated: 900 } }));
+await page.waitForFunction(() => localStorage.getItem("orc_store") === "idb");
 const indexBeforeDown = JSON.stringify(await chatIndex());
 await page.evaluate(() => { localStorage.setItem("__idbDown", "1"); localStorage.setItem("orc_current_chat", "k1"); });
 await page.reload({ waitUntil: "load" });
 await page.waitForSelector(".msg.error", { timeout: 10000 });
 check("blocked: a database that won't open is reported, not shown as no chats", (await page.textContent(".msg.error")).includes("chat storage couldn't be opened") && (await page.textContent(".msg.error")).includes("have not been deleted"));
+await page.click("#open-chats");
+await page.click(".chat-row .chat-delete");
+await page.click(".chat-row .chat-open");
+await page.click("#new-chat-btn");
+check("blocked: chats can't be deleted, opened or started while their store is shut", JSON.stringify(await chatIndex()) === indexBeforeDown && (await page.evaluate(() => localStorage.getItem("orc_current_chat"))) === "k1" && (await page.textContent(".msg.error")).includes("couldn't be opened"));
+await page.click("#chats-overlay", { position: { x: 380, y: 400 } });
 check("blocked: nothing can be sent and nothing is rewritten", (await page.$eval("#composer", e => e.disabled)) && JSON.stringify(await chatIndex()) === indexBeforeDown && (await lsChatKeys()).length === 0 && (await page.evaluate(() => localStorage.getItem("orc_store"))) === "idb");
 await page.evaluate(() => localStorage.removeItem("__idbDown"));
 await page.reload({ waitUntil: "load" });

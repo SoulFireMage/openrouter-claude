@@ -76,6 +76,13 @@ phone, so every change ships as a PR that is merged to `main`, which deploys.
   older version wrote it) is merged by `moveOldChats` on the next launch:
   longer wins, diverged copies are both kept. An old copy is removed only
   after the database has confirmed the write that replaces it.
+- `saveChat` returns before the database has committed. Cleanup that
+  can't be undone goes through `whenChatSaved`. A refused write is listed
+  in `orc_unsaved`; if the app closes before a retry succeeds, the next
+  launch sets `fullAt` to 0 so sync re-reads the whole account.
+- `chatReady()` is false until the chat store has opened and for good if
+  it can't be. Every entry point that changes a chat, the chat list or
+  the account checks it.
 - IndexedDB reports "full" only after a write was accepted. `saveChat`
   therefore refuses up front when the browser's estimate says it won't
   fit, and while an earlier write is still being refused; callers rely on
@@ -147,8 +154,9 @@ phone, so every change ships as a PR that is merged to `main`, which deploys.
   `el._entry` to `history`, so a message element must be built from the
   very object that is in `history`. An edit only touches the chat when the
   edited message is sent (`applyEdit`). Removing the only message deletes
-  the chat. Pictures no message shows any more are dropped with
-  `imagePruneChat`.
+  the chat. Pictures only the removed messages showed are dropped by
+  `pruneWhenSaved`: which ones is settled at the moment of removal, and
+  they are deleted only once that save has committed.
 - In `cloudApply`, a chat changed here while the account still holds the
   revision this device last saw (`rev`) is a plain update and goes up as
   it is. Without that rule a chat made shorter here counts as "the shorter
@@ -170,7 +178,8 @@ phone, so every change ships as a PR that is merged to `main`, which deploys.
 ## localStorage keys
 
 `orc_api_key`, `orc_model`, `orc_system_prompt`, `orc_filters`,
-`orc_chats` (index), `orc_store` (`idb` once chats are in IndexedDB) and
+`orc_chats` (index), `orc_store` (`idb` once chats are in IndexedDB),
+`orc_unsaved` (ids of chats whose last write the database refused) and
 `orc_chat_<id>` (messages, only before that move or where there is no
 IndexedDB), `orc_current_chat`,
 `orc_profiles`, `orc_active_profile`, `orc_image_models` (cached image

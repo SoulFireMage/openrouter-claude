@@ -1349,6 +1349,7 @@
     currentChat: "orc_current_chat",
     chatPrefix: "orc_chat_",
     store: "orc_store",
+    unsaved: "orc_unsaved",
     filters: "orc_filters",
     profiles: "orc_profiles",
     activeProfile: "orc_active_profile",
@@ -1421,6 +1422,13 @@
   var chatRetryTimer = null;
   var chatChannel = null;
 
+  // False until chats can be read, and for good if their store can't be
+  // opened. Nothing may then change a chat, the chat list or the account:
+  // the app would be acting on chats it cannot see.
+  function chatReady() {
+    return chatBooted && !chatStoreBlocked;
+  }
+
   function loadChat(id) {
     if (chatStoreBlocked) return [];
     if (!chatDb) return cleanMessages(readJson(KEYS.chatPrefix + id, []));
@@ -1448,8 +1456,32 @@
     return !!chatSpace && chatSpace.usage + chars * 2 + 1024 * 1024 > chatSpace.quota;
   }
 
+  /* A save returns before the database has committed it. Two things must
+     not get ahead of the commit:
+       - cleanup that can't be undone (pictures a replaced reply no longer
+         shows) waits for it: whenChatSaved;
+       - sync bookkeeping written in the meantime may describe a chat the
+         database never took. KEYS.unsaved lists the chats whose write was
+         refused; if the app is closed before a retry succeeds, the next
+         launch finds the list and re-reads everything from the account. */
+  var chatSeq = {};       // per chat: number of the latest write started
+  var chatAfter = {};     // per chat: what to do once its latest write has committed
+
+  function whenChatSaved(id, fn) {
+    if (!chatDb || !chatSeq[id]) { fn(); return; }   // nothing in flight
+    (chatAfter[id] || (chatAfter[id] = [])).push(fn);
+  }
+
+  function noteUnsaved() {
+    var ids = Object.keys(chatUnsaved);
+    if (ids.length) storageSet(KEYS.unsaved, JSON.stringify(ids)); else storageRemove(KEYS.unsaved);
+  }
+
   function chatWriteFailed(id) {
     chatUnsaved[id] = true;
+    delete chatSeq[id];
+    delete chatAfter[id];     // the cleanup belonged to a version that was never stored
+    noteUnsaved();
     if (!storageFullWarned) {
       storageFullWarned = true;
       showError("This device couldn't save a chat, most likely because its storage is full. The chat is still open here but would be lost on closing the app. Free some space, or export the chat from settings.", false);
@@ -1474,12 +1506,19 @@
     try {
       var tx = chatDb.transaction(CHAT_STORE, "readwrite", CHAT_TX);
       tx.objectStore(CHAT_STORE).put({ id: id, json: json });
+      var seq = chatSeq[id] = (chatSeq[id] || 0) + 1;
       tx.oncomplete = function () {
-        delete chatUnsaved[id];
+        if (chatUnsaved[id]) { delete chatUnsaved[id]; noteUnsaved(); }
         if (!Object.keys(chatUnsaved).length) storageFullWarned = false;
+        if (chatSeq[id] === seq) {      // no later write of this chat is still on its way
+          delete chatSeq[id];
+          var after = chatAfter[id] || [];
+          delete chatAfter[id];
+          after.forEach(function (fn) { fn(); });
+        }
         refreshChatSpace();
       };
-      tx.onabort = function () { chatWriteFailed(id); };
+      tx.onabort = function () { if (chatSeq[id] === seq) chatWriteFailed(id); };
       return true;
     } catch (e) {
       return false;
@@ -1507,7 +1546,9 @@
     if (chatStoreBlocked) return;
     if (!chatDb) { storageRemove(KEYS.chatPrefix + id); return; }
     delete chatMirror[id];
-    delete chatUnsaved[id];
+    delete chatSeq[id];
+    delete chatAfter[id];
+    if (chatUnsaved[id]) { delete chatUnsaved[id]; noteUnsaved(); }
     try {
       chatDb.transaction(CHAT_STORE, "readwrite", CHAT_TX).objectStore(CHAT_STORE).delete(id);
     } catch (e) { /* gone from memory; the record is unreachable without its index entry */ }
@@ -1573,16 +1614,46 @@
     return keys;
   }
 
+  // Whether every message of "shorter" is, field for field, the message
+  // at the same place in "longer". Stricter than the sync rules' isPrefix,
+  // which looks at role and text only: two picture replies have the same
+  // (empty) text, and a regenerated reply keeps versions the text doesn't show.
+  function wholePrefix(shorter, longer) {
+    if (shorter.length > longer.length) return false;
+    for (var i = 0; i < shorter.length; i++) {
+      if (JSON.stringify(shorter[i]) !== JSON.stringify(longer[i])) return false;
+    }
+    return true;
+  }
+
+  function chatDbDelete(db, ids) {
+    return new Promise(function (resolve) {
+      if (!ids.length) { resolve(); return; }
+      try {
+        var tx = db.transaction(CHAT_STORE, "readwrite", CHAT_TX);
+        ids.forEach(function (id) { tx.objectStore(CHAT_STORE).delete(id); });
+        tx.oncomplete = tx.onabort = function () { resolve(); };
+      } catch (e) {
+        resolve();
+      }
+    });
+  }
+
   /* Moves chats still in localStorage into the database. Normally that is
      the one-time move of an upgrade. A copy can also turn up later, written
      by a tab still running the previous version, so one that differs from
      the database's is merged, never dropped: the longer wins, and two that
-     diverged are both kept. An old copy is removed only after the database
-     has confirmed the write that replaces it. */
+     diverged are both kept. An old copy is removed only when
+       - the database has confirmed the write that replaces it,
+       - for a copy kept as a separate chat, the chat list naming it is
+         saved too, and
+       - the old copy still reads exactly as it did when it was moved: a
+         tab on the previous version may have added to it meanwhile, and
+         that newer text then waits for the next launch. */
   async function moveOldChats(db) {
     var keys = oldChatKeys();
-    var puts = [];
-    var settled = [];   // keys whose content is now safely in the database
+    var puts = [];      // { id, json, key, copy? }: to write to the database
+    var settled = [];   // { key, raw }: old copies whose content the database already holds
     keys.forEach(function (key) {
       var id = key.slice(KEYS.chatPrefix.length);
       var raw = storageGet(key);
@@ -1594,27 +1665,51 @@
       }
       var kept;
       try { kept = cleanMessages(JSON.parse(chatMirror[id])); } catch (e) { kept = []; }
-      if (raw === chatMirror[id] || isPrefix(old, kept)) { settled.push(key); return; }
-      if (isPrefix(kept, old)) { puts.push({ id: id, json: raw, key: key }); return; }
-      var meta = chatMeta(id);
-      var copyId = newId();
-      chats.push({ id: copyId, title: ((meta && meta.title) || "Untitled chat") + " (recovered copy)", created: (meta && meta.created) || Date.now(),
-        updated: Date.now(), model: (meta && meta.model) || "", count: old.length });
-      puts.push({ id: copyId, json: raw, key: key, copy: true });
+      if (raw === chatMirror[id] || wholePrefix(old, kept)) { settled.push({ key: key, raw: raw }); return; }
+      if (wholePrefix(kept, old)) { puts.push({ id: id, json: raw, key: key }); return; }
+      puts.push({ id: newId(), json: raw, key: key, copy: true, of: id, count: old.length });
     });
     var ok = await chatDbPutAll(db, puts.map(function (r) { return { id: r.id, json: r.json }; }));
-    // In memory either way, so the chats are there this session even if the
-    // database refused them; the old copies then stay for the next launch.
-    puts.forEach(function (r) { chatMirror[r.id] = r.json; });
-    if (ok) {
-      puts.forEach(function (r) { settled.push(r.key); });
-      if (puts.some(function (r) { return r.copy; })) storageSet(KEYS.chats, JSON.stringify(chats));
-    } else {
-      puts.forEach(function (r) { chatUnsaved[r.id] = true; });
-      chats = chats.filter(function (c) { return !puts.some(function (r) { return r.copy && r.id === c.id; }); });
+    if (!ok) {
+      // Refused. The chats are still there this session, from memory, and
+      // every old copy stays where it is for the next launch.
+      puts.forEach(function (r) {
+        if (r.copy) return;
+        chatMirror[r.id] = r.json;
+        chatUnsaved[r.id] = true;
+      });
+      return false;
     }
-    if (ok) settled.forEach(storageRemove);
-    return ok;
+    var unchanged = function (r) { return storageGet(r.key) === (r.raw !== undefined ? r.raw : r.json); };
+    // The plain moves first: taking their old copies out makes room in
+    // localStorage, which may be full, for the chat list saved next.
+    settled.forEach(function (r) { if (unchanged(r)) storageRemove(r.key); });
+    puts.forEach(function (r) {
+      if (r.copy) return;
+      chatMirror[r.id] = r.json;
+      if (unchanged(r)) storageRemove(r.key);
+    });
+    var copies = puts.filter(function (r) { return r.copy; });
+    if (copies.length) {
+      var before = chats.slice();
+      copies.forEach(function (r) {
+        var meta = chatMeta(r.of);
+        chats.push({ id: r.id, title: ((meta && meta.title) || "Untitled chat") + " (recovered copy)", created: (meta && meta.created) || Date.now(),
+          updated: Date.now(), model: (meta && meta.model) || "", count: r.count });
+      });
+      if (storageSet(KEYS.chats, JSON.stringify(chats))) {
+        copies.forEach(function (r) {
+          chatMirror[r.id] = r.json;
+          if (unchanged(r)) storageRemove(r.key);
+        });
+      } else {
+        // The list couldn't be saved, so these copies would be chats nothing
+        // points to. Take them back out; their old copies stay for next time.
+        chats = before;
+        await chatDbDelete(db, copies.map(function (r) { return r.id; }));
+      }
+    }
+    return true;
   }
 
   // Resolves once chats can be read: from the database, or from
@@ -2093,27 +2188,27 @@
   document.getElementById("edit-cancel").addEventListener("click", function () { cancelEdit(false); });
 
   // Called as an edited message is sent: takes the old message and its
-  // reply out of the chat. False if the chat has changed under the edit.
+  // reply out of the chat and returns them. Null if the chat has changed
+  // under the edit.
   function applyEdit() {
     var at = history.indexOf(editing);
     var ok = at !== -1 && at >= history.length - 2 && history.slice(at + 1).every(function (m) { return m.role === "assistant"; });
     editing = null;
     editBar.hidden = true;
-    if (!ok) return false;
-    history.splice(at);
-    return true;
+    if (!ok) return null;
+    return history.splice(at);
   }
 
   function removeMessage(m) {
-    if (isStreaming) return;
+    if (isStreaming || !chatReady()) return;
     var at = history.indexOf(m);
     if (at === -1) return;
     if (history.length === 1) { deleteChat(currentChatId); return; }   // the chat would be empty
     var what = m.role === "user" ? "your message" : "this reply";
     if (!confirm("Remove " + what + " from the chat? This can't be undone.")) return;
     if (editing) cancelEdit(false);
-    history.splice(at, 1);
-    if (persistHistory()) imagePruneChat(currentChatId);   // only once the chat without it is stored
+    var taken = history.splice(at, 1);
+    if (persistHistory()) pruneWhenSaved(currentChatId, taken);   // only once the chat without it is stored
     renderHistory();
   }
 
@@ -2197,7 +2292,7 @@
   // The cut-off reply leaves the list on screen but stays in storage until
   // its replacement is filed, so closing the app part-way loses nothing.
   function redoLast(mode) {
-    if (isStreaming) return;
+    if (isStreaming || !chatReady()) return;
     var last = history[history.length - 1];
     var asked = history[history.length - 2];
     if (!last || last.role !== "assistant" || !asked || asked.role !== "user") return;
@@ -2242,6 +2337,7 @@
   }
 
   function persistHistory() {
+    if (!chatReady()) return false;
     if (!currentChatId) {
       if (history.length === 0) return;
       currentChatId = newId();
@@ -2358,6 +2454,7 @@
   }
 
   function switchChat(id) {
+    if (!chatReady()) return;
     if (id === currentChatId) { closeChats(); return; }
     if (currentAbort) currentAbort.abort();
     cancelEdit(false);
@@ -2370,6 +2467,7 @@
   }
 
   function startNewChat() {
+    if (!chatReady()) return;
     if (currentAbort) currentAbort.abort();
     cancelEdit(false);
     currentChatId = null;
@@ -2384,6 +2482,7 @@
   }
 
   function deleteChat(id) {
+    if (!chatReady()) return;
     var meta = chatMeta(id);
     if (!meta) return;
     if (!confirm("Delete \"" + meta.title + "\"? This can't be undone.")) return;
@@ -2583,6 +2682,7 @@
   }
 
   function importFromObject(data) {
+    if (!chatReady()) throw new Error("This device's chat storage isn't open, so nothing can be imported just now");
     if (!data || typeof data !== "object" || data.format !== EXPORT_FORMAT || !Array.isArray(data.chats)) {
       throw new Error("Not an OpenRouter Chat export file");
     }
@@ -3510,16 +3610,37 @@
     return used;
   }
 
-  // After a message is removed or replaced: drops this chat's pictures that
-  // no message, in this chat or any other, shows any more.
-  function imagePruneChat(chatId) {
-    if (!chatId) return Promise.resolve();
-    return imageDeleteChat(chatId, true);
+  // Call right after messages have been taken out of a chat: drops the
+  // pictures only they showed, once the save that removed them has been
+  // committed. Which pictures those are is settled now, not at the commit:
+  // by then a new reply's picture may be stored but not yet in the chat,
+  // and would look just as unused. If the save is refused, the stored chat
+  // still shows the old pictures, and they are kept.
+  function pruneWhenSaved(chatId, removed) {
+    var still = imagesUsedElsewhere(null);
+    var gone = {};
+    removed.forEach(function (m) {
+      var lists = [m.images].concat(Array.isArray(m.versions) ? m.versions.map(function (v) { return v && v.images; }) : []);
+      lists.forEach(function (list) {
+        if (Array.isArray(list)) list.forEach(function (ref) { if (ref && ref.id && !still[ref.id]) gone[ref.id] = true; });
+      });
+    });
+    var ids = Object.keys(gone);
+    if (ids.length) whenChatSaved(chatId, function () { imageDeleteIds(ids); });
   }
 
-  // onlyOrphans: keep the pictures this chat's own messages still show.
-  async function imageDeleteChat(chatId, onlyOrphans) {
-    var keep = imagesUsedElsewhere(onlyOrphans ? null : chatId);
+  async function imageDeleteIds(ids) {
+    ids.forEach(function (id) { delete memImages[id]; });
+    var db = await imgDb();
+    if (!db) return;
+    try {
+      var store = db.transaction(IMG_STORE, "readwrite").objectStore(IMG_STORE);
+      ids.forEach(function (id) { store.delete(id); });
+    } catch (e) { /* nothing more to do */ }
+  }
+
+  async function imageDeleteChat(chatId) {
+    var keep = imagesUsedElsewhere(chatId);
     Object.keys(memImages).forEach(function (k) { if (memImages[k].chatId === chatId && !keep[k]) delete memImages[k]; });
     var db = await imgDb();
     if (!db) return;
@@ -4022,7 +4143,7 @@
   }
 
   async function sendMessage(retrying, redo) {
-    if (isStreaming) return;
+    if (isStreaming || !chatReady()) return;
 
     var text;
     if (retrying) {
@@ -4048,9 +4169,10 @@
       // the chat changed under the edit (a sync brought in another copy),
       // nothing is sent: the text would land as a new turn beside the
       // message it was meant to replace.
-      var edited = !!editing;
-      if (edited) {
-        if (!applyEdit()) {
+      var replaced = null;
+      if (editing) {
+        replaced = applyEdit();
+        if (!replaced) {
           showError("This chat changed while you were editing, so nothing was sent. Your text is still in the box: look over the chat, then send it or edit again.", false);
           return;
         }
@@ -4061,7 +4183,7 @@
       history.push(mine);
       // Pictures of the replaced reply go only once the chat without them
       // is safely stored; if that failed, the stored copy still shows them.
-      if (persistHistory() && edited) imagePruneChat(currentChatId);
+      if (persistHistory() && replaced) pruneWhenSaved(currentChatId, replaced);
       appendMessageEl(mine);
       composerEl.value = "";
       composerEl.style.height = "auto";
@@ -5648,7 +5770,7 @@
 
   // full: re-read every record instead of only those changed since last time.
   async function cloudSync(full) {
-    if (!cloudActive()) return;
+    if (!cloudActive() || !chatReady()) return;
     if (cloudSyncing) { cloudAgain = true; return; }
     if (isStreaming) { cloudTouch(); return; }
     // Once a day, check everything rather than only what changed.
@@ -5867,7 +5989,7 @@
   // replaced; then the result is read back to confirm it arrived.
   async function cloudSendChat(id) {
     var meta = chatMeta(id);
-    if (!meta || !cloudActive()) return;
+    if (!meta || !cloudActive() || !chatReady()) return;
     var name = "\u201c" + (meta.title || "Untitled chat") + "\u201d";
     if (cloudSyncing) { setChatSyncNote("A sync is already running. Try again in a moment."); return; }
     if (isStreaming && id === currentChatId) { setChatSyncNote("Wait for the reply to finish, then send " + name + "."); return; }
@@ -6208,6 +6330,14 @@
     currentChatId = storageGet(KEYS.currentChat) || null;
     if (currentChatId && !chats.some(function (c) { return c.id === currentChatId; })) currentChatId = null;
     history = currentChatId ? loadChat(currentChatId) : [];
+    // A chat's write was refused last time and the app closed before it
+    // went through: what sync recorded may not match what was stored, so
+    // the next sync re-reads everything from the account.
+    if (storageGet(KEYS.unsaved)) {
+      cloudState.fullAt = 0;
+      saveCloudState();
+      if (!Object.keys(chatUnsaved).length) storageRemove(KEYS.unsaved);
+    }
     chatBooted = true;
     if (chatDb && chats.length) requestPersistentStorage();
     updateChatTitle();
