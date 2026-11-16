@@ -578,6 +578,28 @@
 
   .chat-row .chat-delete:active { color: var(--error); }
 
+  /* Per-chat sync mark: in the account, or waiting to go up. Tap to send now. */
+  .chat-row .chat-sync {
+    background: none;
+    border: none;
+    color: var(--text-muted);
+    padding: 0 8px;
+    font-size: 14px;
+    cursor: pointer;
+    flex: none;
+    min-width: 36px;
+  }
+  .chat-row .chat-sync.waiting { color: var(--accent); }
+  .chat-row .chat-sync:disabled { opacity: 0.5; }
+
+  #chat-sync-status {
+    font-size: 12px;
+    color: var(--text-muted);
+    margin: 8px 0 0;
+    line-height: 1.4;
+  }
+  #chat-sync-status.error { color: var(--error); }
+
   #chat-list-empty {
     color: var(--text-muted);
     font-size: 13px;
@@ -1076,6 +1098,7 @@
   <div id="chats-panel">
     <h2>Chats</h2>
     <button class="btn primary" id="new-chat-btn">New chat</button>
+    <div id="chat-sync-status" role="status" hidden></div>
     <div id="chat-list"></div>
     <div id="chats-tools">
       <div class="btn-row">
@@ -1236,7 +1259,7 @@
   var OPENROUTER = "https://openrouter.ai/api/v1";
   // Shown in settings so it is plain which build a device is running. Keep
   // it equal to the number in sw.js's CACHE_NAME (a test checks this).
-  var APP_VERSION = 27;
+  var APP_VERSION = 28;
   var APP_TITLE = "OpenRouter Chat";
 
   /* ---------------- Storage: localStorage with in-memory fallback ---------------- */
@@ -1867,6 +1890,7 @@
   }
 
   function renderChatList() {
+    renderChatSyncStatus();
     chatListEl.innerHTML = "";
     if (chats.length === 0) {
       var none = document.createElement("div");
@@ -1897,6 +1921,19 @@
       open.appendChild(sub);
       open.addEventListener("click", function () { switchChat(c.id); });
 
+      var mark = cloudChatMark(c);
+      var sync = null;
+      if (mark) {
+        sync = document.createElement("button");
+        sync.type = "button";
+        sync.className = "chat-sync" + (mark.waiting ? " waiting" : "");
+        sync.textContent = mark.icon;
+        sync.title = mark.label;
+        sync.setAttribute("aria-label", mark.label);
+        sync.disabled = cloudSyncing;
+        sync.addEventListener("click", function () { cloudSendChat(c.id); });
+      }
+
       var del = document.createElement("button");
       del.type = "button";
       del.className = "chat-delete";
@@ -1905,12 +1942,14 @@
       del.addEventListener("click", function () { deleteChat(c.id); });
 
       row.appendChild(open);
+      if (sync) row.appendChild(sync);
       row.appendChild(del);
       chatListEl.appendChild(row);
     });
   }
 
   function openChats() {
+    chatSyncNote = null;
     renderChatList();
     chatsOverlay.classList.add("open");
   }
@@ -4412,13 +4451,24 @@
        - changed on both and diverged: both are kept, this device's as a copy.
      orc_cloud_state remembers, per chat, the "updated" stamp it had when
      last in step with the account; a chat whose stamp differs is waiting
-     to be pushed. */
+     to be pushed.
+
+     Three guards against a chat going missing:
+       - a delete made here is dropped if the account's copy turns out to be
+         newer than the one this device last saw (another device added to
+         it), so a delete can never destroy text the deleter had not seen;
+       - once a day the pull re-reads everything instead of only what
+         changed, so a record an incremental pull missed still arrives and
+         a chat the account lost is uploaded again;
+       - any one chat can be sent on demand from the chats list
+         (cloudSendChat), merged with the account's copy and read back. */
   var SKAPI_PROJECT_ID = "5GJ5SJePWQUiq0jvYr-2ZVgaOLUqOhnse3Hcl8M4d";
   var CLOUD_TABLE = { name: "orc_chats", access_group: "private" };
   var CLOUD_DEBOUNCE_MS = 3000;
   // Skapi's index of "updated since" can lag a write by a moment, so each
   // pull re-reads a little before the last change it saw.
   var CLOUD_OVERLAP_MS = 120000;
+  var CLOUD_FULL_EVERY_MS = 24 * 60 * 60 * 1000;
 
   var cloudBox = {
     signedOut: document.getElementById("cloud-signed-out"),
@@ -4466,7 +4516,7 @@
   function freshCloudState(userId) {
     return { user: userId || "", cursor: 0, synced: {}, deleted: {}, profiles: NO_PROFILES, goneProfiles: {},
       keySync: false, keyPrint: "", keyRemove: false, keyDeclined: false, keyOptAt: 0,
-      dev: newId(), vv: {} };
+      dev: newId(), vv: {}, delStamp: {}, rev: {}, fullAt: 0 };
   }
 
   function readCloudState() {
@@ -4484,6 +4534,9 @@
     if (typeof st.keyOptAt !== "number") st.keyOptAt = 0;
     if (typeof st.dev !== "string" || !st.dev) st.dev = newId();
     if (!st.vv || typeof st.vv !== "object") st.vv = {};
+    if (!st.delStamp || typeof st.delStamp !== "object") st.delStamp = {};
+    if (!st.rev || typeof st.rev !== "object") st.rev = {};
+    if (typeof st.fullAt !== "number") st.fullAt = 0;
     return st;
   }
 
@@ -4558,6 +4611,15 @@
     });
   }
 
+  // Remembers which revision of a chat the account was last seen to hold
+  // (its "updated" stamp). synced[] can't serve: it is this device's own
+  // stamp, and differs whenever the two sides hold the same text under
+  // different stamps. A delete is only safe against the revision seen.
+  function cloudSaw(d) {
+    if (typeof d.updated === "number") cloudState.rev[d.id] = d.updated;
+    else delete cloudState.rev[d.id];
+  }
+
   // Earlier versions kept on replies are part of a chat too.
   function sameVersions(a, b) {
     for (var i = 0; i < a.length; i++) {
@@ -4570,6 +4632,7 @@
   function cloudStore(d, messages) {
     if (!saveChat(d.id, messages)) return false;
     cloudNoteSeen(d);
+    cloudSaw(d);
     var meta = chatMeta(d.id);
     if (!meta) {
       meta = { id: d.id, created: typeof d.created === "number" ? d.created : Date.now() };
@@ -4586,7 +4649,8 @@
   }
 
   // Applies one record from the account. Returns what happened: "same",
-  // "pulled", "kept", "copied", "removed", "full" (no room to store it),
+  // "pulled", "kept", "copied", "removed", "restored" (a delete made here
+  // was dropped for a newer copy), "full" (no room to store it),
   // "later" (its chat is busy) or "" (not a usable record).
   function cloudApply(rec) {
     var d = rec && rec.data;
@@ -4597,6 +4661,7 @@
 
     if (d.deleted) {
       delete cloudState.deleted[id];
+      delete cloudState.delStamp[id];
       if (!meta) return "same";
       // Changes made here that were never uploaded outrank a delete made
       // elsewhere: the chat stays and is uploaded again.
@@ -4606,6 +4671,7 @@
       chats = chats.filter(function (c) { return c.id !== id; });
       delete cloudState.synced[id];
       delete cloudState.vv[id];
+      delete cloudState.rev[id];
       if (id === currentChatId) {
         currentChatId = null;
         history = [];
@@ -4618,7 +4684,18 @@
     var remote = cleanMessages(d.messages);
     if (!remote.length) return "";
     if (!meta) {
-      if (hasOwn(cloudState.deleted, id)) return "same";   // deleted here; that delete is about to be uploaded
+      if (hasOwn(cloudState.deleted, id)) {
+        // Deleted here, and that delete is about to be uploaded. If the
+        // account's copy is not the one this device last saw, another
+        // device has changed it since: the delete was aimed at an older
+        // version, so it is dropped and the newer chat comes back instead
+        // of being destroyed on every device.
+        var seenStamp = cloudState.delStamp[id];
+        if (seenStamp === undefined || d.updated === seenStamp) return "same";
+        delete cloudState.deleted[id];
+        delete cloudState.delStamp[id];
+        return cloudStore(d, remote) ? "restored" : "full";
+      }
       return cloudStore(d, remote) ? "pulled" : "full";
     }
     var local = localMessages(id);
@@ -4626,12 +4703,13 @@
     if (sameMessages(local, remote)) {
       if (sameVersions(local, remote)) {
         cloudNoteSeen(d);
+        cloudSaw(d);
         cloudState.synced[id] = meta.updated;
         return "same";
       }
       // Same text, different kept versions: whichever side changed last
       // carries them, and nothing is lost either way.
-      if (dirty) return "kept";
+      if (dirty) { cloudSaw(d); return "kept"; }
       return cloudStore(d, remote) ? "pulled" : "full";
     }
     // Unchanged here since the last sync, and the writer had seen this
@@ -4640,6 +4718,7 @@
     if (!dirty && !overwritten) return cloudStore(d, remote) ? "pulled" : "full";
     if (isPrefix(remote, local)) {
       if (overwritten) cloudState.synced[id] = 0;   // this device's longer copy goes up again
+      cloudSaw(d);                                  // everything in it is also here
       return "kept";
     }
     if (isPrefix(local, remote)) return cloudStore(d, remote) ? "pulled" : "full";
@@ -4974,6 +5053,7 @@
       if (res !== "taken") {
         cloudState.synced[id] = stamp;
         cloudState.vv[id] = vv;
+        cloudState.rev[id] = stamp;
         // Deleted while it was on its way up: the delete found nothing to
         // record then, so record it now or the chat would come back.
         if (!chatMeta(id)) cloudNoteDeleted(id);
@@ -4991,7 +5071,37 @@
     return false;
   }
 
+  // The account's record for one chat, or null if it has none.
+  async function cloudGet(sk, userId, id) {
+    try {
+      var got = await sk.getRecords({ unique_id: cloudUid(userId, id) });
+      return (got && Array.isArray(got.list) && got.list[0]) || null;
+    } catch (e) {
+      if (/not exist/i.test(errText(e))) return null;
+      throw e;
+    }
+  }
+
+  // Uploads a pending delete. The listing can lag behind a write, so the
+  // pull may not have shown a newer copy: the record is fetched and checked
+  // against the revision this device last saw before anything is replaced.
+  // A changed copy is restored here instead ("restored"); a failed lookup
+  // throws, which leaves the delete pending for the next sync.
   async function cloudPushDelete(sk, userId, id) {
+    var seenStamp = cloudState.delStamp[id];
+    if (seenStamp !== undefined) {
+      var rec = await cloudGet(sk, userId, id);
+      var d = rec && rec.data;
+      if (d && typeof d === "object" && d.id === id && !d.deleted && d.updated !== seenStamp && !chatMeta(id)) {
+        var remote = cleanMessages(d.messages);
+        if (remote.length) {
+          if (!cloudStore(d, remote)) throw new Error("this device's storage is full");
+          delete cloudState.deleted[id];
+          delete cloudState.delStamp[id];
+          return "restored";
+        }
+      }
+    }
     try {
       await sk.postRecord({ v: 1, id: id, deleted: true, updated: cloudState.deleted[id] || Date.now() },
         { record_id: cloudUid(userId, id) });
@@ -5000,6 +5110,8 @@
       if (!/no access to update|not exist/i.test(errText(e))) throw e;
     }
     delete cloudState.deleted[id];
+    delete cloudState.delStamp[id];
+    return "deleted";
   }
 
   function setCloudNote(text, isError) {
@@ -5016,13 +5128,16 @@
     if (!cloudActive()) return;
     if (cloudSyncing) { cloudAgain = true; return; }
     if (isStreaming) { cloudTouch(); return; }
+    // Once a day, check everything rather than only what changed.
+    if (!full && Date.now() - cloudState.fullAt > CLOUD_FULL_EVERY_MS) full = true;
     clearTimeout(cloudTimer);
     cloudTimer = null;
     cloudSyncing = true;
     cloudRerender = false;
+    chatSyncNote = null;   // this sync's outcome is the news now, not an earlier one-chat send
     var userId = cloudUser.id;
     var still = function () { return cloudActive() && cloudUser.id === userId; };
-    var tally = { pulled: 0, pushed: 0, copied: 0, removed: 0, full: 0, failed: 0, error: "", profiles: false, key: "", keyUnreadable: false, keyNeedsSignIn: false };
+    var tally = { pulled: 0, pushed: 0, copied: 0, removed: 0, restored: 0, full: 0, failed: 0, error: "", profiles: false, key: "", keyUnreadable: false, keyNeedsSignIn: false };
     var sk = null;
     setCloudNote("Syncing…");
     try {
@@ -5034,6 +5149,7 @@
       var hold = false;
       var seen = {};
       var pulledKey = null;
+      var inAccount = {};  // ids of the chats the account holds, gathered on a full pull
       var blocked = {};   // chats whose account copy could not be merged in: never upload over those
       list.forEach(function (rec) {
         if (rec && rec.data && rec.data.kind === "key") pulledKey = rec.data;
@@ -5048,7 +5164,11 @@
           if (Array.isArray(rec.data.profiles)) cloudState.profiles = cloudRemoteProfilesKey(rec.data);
         }
         var out = cloudApply(rec);
-        if (rec && rec.data && typeof rec.data.id === "string") seen[rec.data.id] = true;
+        if (rec && rec.data && typeof rec.data.id === "string") {
+          seen[rec.data.id] = true;
+          if (!rec.data.deleted && Array.isArray(rec.data.messages)) inAccount[rec.data.id] = true;
+          else delete inAccount[rec.data.id];
+        }
         if (hasOwn(tally, out)) tally[out]++;
         if (out === "full" || out === "later") {
           hold = true;
@@ -5058,6 +5178,7 @@
       });
       // A record that could not be applied must be offered again next time.
       if (!hold) cloudState.cursor = newest;
+      if (full && !hold) cloudState.fullAt = Date.now();
       // A chat this device thought was uploaded but the account no longer
       // has is uploaded again, never removed.
       if (full) Object.keys(cloudState.synced).forEach(function (id) { if (!seen[id]) delete cloudState.synced[id]; });
@@ -5071,7 +5192,7 @@
         if (blocked[pending[i]]) continue;
         if (isStreaming && pending[i] === currentChatId) { cloudAgain = true; continue; }
         try {
-          if (await cloudPushChat(sk, userId, pending[i])) tally.pushed++;
+          if (await cloudPushChat(sk, userId, pending[i])) { tally.pushed++; inAccount[pending[i]] = true; }
         } catch (e) {
           tally.failed++;
           tally.error = errText(e);
@@ -5098,12 +5219,18 @@
       for (var j = 0; j < gone.length; j++) {
         if (!still()) return;
         try {
-          await cloudPushDelete(sk, userId, gone[j]);
+          if (await cloudPushDelete(sk, userId, gone[j]) === "restored") {
+            tally.restored++;
+            inAccount[gone[j]] = true;
+          } else {
+            delete inAccount[gone[j]];
+          }
         } catch (e) {
           tally.failed++;
           tally.error = errText(e);
         }
       }
+      chats.sort(function (a, b) { return b.updated - a.updated; });
       storageSet(KEYS.chats, JSON.stringify(chats));
       saveCloudState();
       cloudLastSync = Date.now();
@@ -5117,7 +5244,11 @@
       if (tally.key === "sent") bits.push("encrypted key uploaded");
       if (tally.key === "removed") bits.push("encrypted key removed from your account");
       if (tally.removed) bits.push(plural(tally.removed, "chat") + " deleted on another device removed here");
+      if (tally.restored) bits.push(plural(tally.restored, "chat") + " deleted here had newer changes from another device, so " + (tally.restored === 1 ? "it was" : "they were") + " kept");
       var note = "Synced at " + formatWhen(cloudLastSync) + (bits.length ? ": " + bits.join(", ") : "") + ".";
+      var waiting = chats.filter(cloudDirty).length;
+      if (full) note += " Everything was checked: this device has " + plural(chats.length, "chat") + ", your account " + Object.keys(inAccount).length + ".";
+      if (waiting && !tally.failed) note += " " + plural(waiting, "chat") + " here " + (waiting === 1 ? "is" : "are") + " still waiting to upload.";
       if (tally.keyNeedsSignIn) note += " Your account holds an encrypted OpenRouter key. To receive it here, sign out and sign in again.";
       if (tally.keyUnreadable) note += " The key stored in your account was encrypted with an earlier password and can't be read here; enter it in settings once more.";
       if (tally.full) note += " This device's storage is full, so " + plural(tally.full, "chat") + " from your account couldn't be saved here.";
@@ -5138,6 +5269,116 @@
     }
   }
 
+  /* ----- One chat on demand, and what the chats list shows ----- */
+  var chatSyncStatus = document.getElementById("chat-sync-status");
+  var chatSyncNote = null;   // { text, error }: the outcome of the last "send this chat"
+
+  function setChatSyncNote(text, isError) {
+    chatSyncNote = text ? { text: text, error: !!isError } : null;
+    renderChatSyncStatus();
+  }
+
+  // The mark beside a chat in the list while signed in: in the account, or
+  // waiting to go up. Null when there is no account to compare with.
+  function cloudChatMark(meta) {
+    if (!cloudActive()) return null;
+    return cloudDirty(meta)
+      ? { icon: "\u2191", waiting: true, label: "Not in your account yet. Tap to upload it now" }
+      : { icon: "\u2713", waiting: false, label: "In your account. Tap to check it and send it again" };
+  }
+
+  function renderChatSyncStatus() {
+    var text = "", error = false;
+    if (cloudUser && cloudUser.expired) {
+      text = "Your sign-in has expired, so chats are not syncing. They are safe on this device; sign in again in settings.";
+      error = true;
+    } else if (cloudActive()) {
+      if (chatSyncNote) {
+        text = chatSyncNote.text;
+        error = chatSyncNote.error;
+      } else if (cloudSyncing) {
+        text = "Syncing\u2026";
+      } else if (cloudNote.error && cloudNote.text) {
+        text = cloudNote.text;
+        error = true;
+      } else {
+        var waiting = chats.filter(cloudDirty).length;
+        text = waiting
+          ? plural(waiting, "chat") + " not in your account yet (\u2191). " + (waiting === 1 ? "It uploads" : "They upload") + " automatically; tap \u2191 to send one now."
+          : chats.length ? "All " + plural(chats.length, "chat") + " here " + (chats.length === 1 ? "is" : "are") + " in your account (\u2713)." : "";
+        if (text && cloudLastSync) text += " Last synced " + formatWhen(cloudLastSync) + ".";
+      }
+    }
+    chatSyncStatus.textContent = text;
+    chatSyncStatus.classList.toggle("error", error);
+    chatSyncStatus.hidden = !text;
+  }
+
+  // Sends one chat to the account now, whatever the bookkeeping says about
+  // it. The account's copy is fetched and merged first by the usual rules,
+  // with this device's copy treated as changed so it is never simply
+  // replaced; then the result is read back to confirm it arrived.
+  async function cloudSendChat(id) {
+    var meta = chatMeta(id);
+    if (!meta || !cloudActive()) return;
+    var name = "\u201c" + (meta.title || "Untitled chat") + "\u201d";
+    if (cloudSyncing) { setChatSyncNote("A sync is already running. Try again in a moment."); return; }
+    if (isStreaming && id === currentChatId) { setChatSyncNote("Wait for the reply to finish, then send " + name + "."); return; }
+    if (cloudTimer) { clearTimeout(cloudTimer); cloudTimer = null; cloudAgain = true; }
+    cloudSyncing = true;
+    cloudRerender = false;
+    var userId = cloudUser.id;
+    var still = function () { return cloudActive() && cloudUser.id === userId; };
+    var sk = null;
+    setChatSyncNote("Sending " + name + "\u2026");
+    renderChatList();
+    var fetchRec = function () { return cloudGet(sk, userId, id); };
+    try {
+      sk = await loadSkapi();
+      var rec = await fetchRec();
+      if (!still()) return;
+      var hadEntry = hasOwn(cloudState.synced, id);
+      var prevEntry = cloudState.synced[id];
+      if (rec) cloudState.synced[id] = 0;       // known to the account, and this copy wants to go up
+      else delete cloudState.synced[id];        // not there: it will be created
+      var out = rec ? cloudApply(rec) : "";
+      if (out === "full" || out === "later") {
+        // Not merged, so the "wants to go up" marker must not outlive this
+        // attempt: a later sync would upload over a copy it never merged.
+        if (hadEntry) cloudState.synced[id] = prevEntry; else delete cloudState.synced[id];
+      }
+      if (out === "full") { setChatSyncNote("This device's storage is full, so " + name + " couldn't be merged with your account's copy. Nothing was changed.", true); return; }
+      if (out === "later") { setChatSyncNote("Wait for the reply to finish, then send " + name + "."); return; }
+      if (out === "copied") cloudAgain = true;  // this device's version became a copy; it goes up next
+      if (chatMeta(id)) await cloudPushChat(sk, userId, id);
+      if (!still()) return;
+      var back = await fetchRec();
+      var local = localMessages(id);
+      var arrived = !!(back && back.data && !back.data.deleted && sameMessages(cleanMessages(back.data.messages), local));
+      var count = plural(local.length, "message");
+      if (!arrived) setChatSyncNote(name + " was sent, but reading it back from your account didn't match. It is safe on this device; try again.", true);
+      else if (out === "copied") setChatSyncNote(name + " had been changed in two places, so both versions are kept: your account's under this name, and this device's as a copy that is uploading now.");
+      else if (out === "pulled") setChatSyncNote("Your account already had a longer version of " + name + ". It is now on this device too (" + count + "); nothing was lost.");
+      else if (out === "same") setChatSyncNote(name + " is already in your account and matches this device (" + count + ").");
+      else setChatSyncNote(name + " is now in your account (" + count + "), checked by reading it back.");
+    } catch (e) {
+      if (still()) {
+        setChatSyncNote("Couldn't send " + name + " (" + errText(e) + "). It is safe on this device.", true);
+        cloudCheckSession(sk);
+      }
+    } finally {
+      chats.sort(function (a, b) { return b.updated - a.updated; });
+      storageSet(KEYS.chats, JSON.stringify(chats));
+      saveCloudState();
+      cloudSyncing = false;
+      updateChatTitle();
+      if (cloudRerender && !isStreaming) renderHistory();
+      if (chatsOverlay.classList.contains("open")) renderChatList();
+      renderCloud();
+      if (cloudAgain) { cloudAgain = false; cloudTouch(); }
+    }
+  }
+
   // Schedules a sync shortly after a change, so a burst of changes is one sync.
   function cloudTouch() {
     if (!cloudActive()) return;
@@ -5149,6 +5390,11 @@
   // so it still reaches the account the next time the same user signs in.
   function cloudNoteDeleted(id) {
     if (!hasOwn(cloudState.synced, id)) return;
+    // The account revision this device last saw is the one being deleted.
+    // Unknown (state from before revisions were tracked): no check is made.
+    if (hasOwn(cloudState.rev, id)) cloudState.delStamp[id] = cloudState.rev[id];
+    else delete cloudState.delStamp[id];
+    delete cloudState.rev[id];
     delete cloudState.synced[id];
     delete cloudState.vv[id];
     cloudState.deleted[id] = Date.now();

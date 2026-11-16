@@ -88,6 +88,24 @@ phone, so every change ships as a PR that is merged to `main`, which deploys.
   has made is merged as a conflict, never taken as a plain update. A chat
   whose account copy could not be merged in (storage full, busy) must not
   be uploaded in that sync.
+- An incremental pull only sees records changed since `cursor`, so a
+  record it misses once is never seen again. `cloudSync` therefore turns
+  itself into a full pull when `fullAt` in `orc_cloud_state` is over a day
+  old. Keep that, and keep full pulls loss-free.
+- A pending delete carries the account revision this device last saw
+  (`delStamp`, taken from `rev`, which `cloudSaw` keeps; `synced` is this
+  device's own stamp and is not the same thing). If the account's record
+  has a different `updated`, another device changed the chat since: the
+  delete is dropped and the chat restored. The check is made both on the
+  pull and, because the listing can lag, on the record itself in
+  `cloudPushDelete`. Never let a delete overwrite a version the deleting
+  device had not seen.
+- `cloudSendChat` (the mark beside a chat in the list) sends one chat on
+  demand: fetch the account's record, mark this device's copy as changed,
+  merge with `cloudApply`, push, read back. It shares the `cloudSyncing`
+  lock with `cloudSync`. If the merge is refused ("full", "later") the
+  "changed" marker must be put back as it was, or a later sync would
+  upload over a copy it never merged.
 - An interrupted reply can be continued or regenerated (`redoLast`). The
   cut-off reply is taken off `history` in memory only and stays in storage
   until its replacement is filed, so it must be put back on every path
@@ -113,7 +131,9 @@ phone, so every change ships as a PR that is merged to `main`, which deploys.
 `orc_profiles`, `orc_active_profile`, `orc_image_models` (cached image
 catalogue), `orc_image_opts` (per-model image options), `orc_cloud_user`
 (`{ id, email, expired? }` while signed in) and `orc_cloud_state` (sync
-bookkeeping: cursor, per-chat synced stamps, pending deletes, last synced
+bookkeeping: cursor, time of the last full pull, per-chat synced stamps,
+the account revision last seen per chat, pending deletes and the
+revisions they were aimed at, last synced
 profiles and deleted profile ids, key-sync flags and fingerprint) and
 `orc_cloud_kek` (the password-derived encrypting key, removed on sign-out).
 Legacy keys cleaned up on load:

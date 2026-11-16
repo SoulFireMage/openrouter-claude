@@ -2036,6 +2036,210 @@ await p2.waitForFunction(() => document.querySelector("#messages").textContent.i
 check("stall: a dead connection after returning is dropped and retried", (await p2.$$(".msg.error")).length === 0);
 await offline.close();
 
+// ---------- Sync: nothing goes missing between devices ----------
+// Per-chat marks and "send this chat now", a delete that must not destroy
+// newer text from another device, and the daily full re-check.
+await page.evaluate(() => {
+  ["__skapiDown", "__skapiLag", "__skapiPage", "__quotaKey"].forEach(k => localStorage.removeItem(k));
+  localStorage.setItem("__skapiFake", "1");
+});
+const editRemote = (email, chatId, fn) => page.evaluate(([email, chatId, src]) => {
+  const db = JSON.parse(localStorage.getItem("__skapi_db"));
+  const uid = db.users[email].id;
+  const i = db.records.findIndex(r => r.user_id === uid && r.data.id === chatId);
+  db.clock = Math.max(Date.now(), (db.clock || 0) + 1);
+  const out = new Function("db", "i", "uid", "now", src)(db, i, uid, db.clock);
+  localStorage.setItem("__skapi_db", JSON.stringify(db));
+  return out;
+}, [email, chatId, fn]);
+const remoteOf = (email) => page.evaluate((email) => {
+  const db = JSON.parse(localStorage.getItem("__skapi_db"));
+  return Object.fromEntries(db.records.filter(r => r.user_id === db.users[email].id && r.data.id).map(r => [r.data.id, r.data]));
+}, email);
+const openChatList = async () => { if (!(await page.$eval("#chats-overlay", e => e.classList.contains("open")))) await page.click("#open-chats"); };
+const closeChatList = async () => { if (await page.$eval("#chats-overlay", e => e.classList.contains("open"))) await page.click("#chats-overlay", { position: { x: 380, y: 400 } }); };
+const marks = () => page.$$eval(".chat-row", rows => Object.fromEntries(rows.map(r => [r.querySelector(".chat-title").textContent, (r.querySelector(".chat-sync") || {}).textContent || ""])));
+const chatSyncText = () => page.textContent("#chat-sync-status");
+const sendChat = async (title) => {
+  await openChatList();
+  await page.click(`.chat-row:has(.chat-title:text-is("${title}")) .chat-sync`);
+  await page.waitForFunction(() => { const t = document.getElementById("chat-sync-status").textContent; return t && !/^Sending/.test(t); });
+};
+const FRIEND = "friend@example.com";
+
+// With no account there is nothing to compare with: no marks, no status.
+await putDevice(dev({ s1: { messages: qa("s1 q", "s1 a", "s1 q2", "s1 a2"), updated: 1000 }, s2: { messages: qa("s2 q", "s2 a"), updated: 2000 } }));
+await openChatList();
+check("send: signed out shows no sync marks or status", Object.values(await marks()).every(m => m === "") && (await page.$eval("#chat-sync-status", e => e.hidden)), JSON.stringify(await marks()));
+await closeChatList();
+
+await signIn(FRIEND, "story-pass", true);
+await synced();
+await page.click("#save-settings");
+await openChatList();
+check("send: every uploaded chat is marked as in the account", JSON.stringify(await marks()) === JSON.stringify({ s2: "✓", s1: "✓" }), JSON.stringify(await marks()));
+check("send: the chats list says everything is in the account", (await chatSyncText()).startsWith("All 2 chats here are in your account"), await chatSyncText());
+check("send: a full sync reports both counts", (await cloudStatus()).includes("Everything was checked: this device has 2 chats, your account 2."), await cloudStatus());
+
+// The account has lost a chat this device believes it uploaded. Sending
+// that one chat puts it back and reads it back to confirm.
+await editRemote(FRIEND, "s1", "db.records.splice(i, 1);");
+check("send: setup, the account no longer has the chat", !(await remoteOf(FRIEND)).s1);
+await sendChat("s1");
+check("send: a chat missing from the account is uploaded on demand", texts((await remoteOf(FRIEND)).s1) === "s1 q|s1 a|s1 q2|s1 a2", JSON.stringify(await remoteOf(FRIEND)));
+check("send: the outcome is confirmed by reading it back", /“s1” is now in your account \(4 messages\), checked by reading it back\./.test(await chatSyncText()), await chatSyncText());
+
+// The account holds a shorter copy while this device thinks they match. A
+// normal sync would take the account's; sending keeps the longer one.
+await editRemote(FRIEND, "s1", "db.records[i].data.messages = db.records[i].data.messages.slice(0, 2); db.records[i].updated = now;");
+await sendChat("s1");
+check("send: this device's longer copy replaces a shorter one in the account", texts((await remoteOf(FRIEND)).s1) === "s1 q|s1 a|s1 q2|s1 a2" && texts((await localChats()).s1) === "s1 q|s1 a|s1 q2|s1 a2", JSON.stringify(await remoteOf(FRIEND)));
+
+// Identical on both sides: nothing to do, and it says so.
+await sendChat("s1");
+check("send: an identical chat is reported as already there", (await chatSyncText()).includes("is already in your account and matches this device (4 messages)"), await chatSyncText());
+
+// The account's copy is longer: it comes down, nothing is lost.
+await editRemote(FRIEND, "s2", "db.records[i].data.messages.push({ role: 'user', content: 's2 phone q' }, { role: 'assistant', content: 's2 phone a' }); db.records[i].data.updated = now; db.records[i].updated = now;");
+await sendChat("s2");
+check("send: a longer copy in the account is brought down instead", texts((await localChats()).s2) === "s2 q|s2 a|s2 phone q|s2 phone a" && (await chatSyncText()).includes("already had a longer version"), await chatSyncText());
+
+// Changed differently in both places: both versions survive.
+await editRemote(FRIEND, "s2", "db.records[i].data.messages = [{ role: 'user', content: 's2 q' }, { role: 'assistant', content: 'a different ending' }]; db.records[i].data.updated = now; db.records[i].updated = now;");
+await sendChat("s2");
+await page.waitForFunction((email) => { const db = JSON.parse(localStorage.getItem("__skapi_db")); return db.records.filter(r => r.user_id === db.users[email].id && r.data.messages).length === 3; }, FRIEND, { timeout: 15000 });
+const afterBoth = Object.values(await localChats()).map(texts).sort();
+const remoteBoth = Object.values(await remoteOf(FRIEND)).map(texts).sort();
+check("send: diverged copies are both kept on the device", JSON.stringify(afterBoth) === JSON.stringify(["s1 q|s1 a|s1 q2|s1 a2", "s2 q|a different ending", "s2 q|s2 a|s2 phone q|s2 phone a"]), JSON.stringify(afterBoth));
+check("send: and both end up in the account", JSON.stringify(remoteBoth) === JSON.stringify(afterBoth), JSON.stringify(remoteBoth));
+
+// A chat that could not be uploaded is marked as waiting, and can be sent
+// by hand once the connection is back.
+await closeChatList();
+await page.evaluate(() => { localStorage.setItem("__skapiDown", "1"); window.__scenarios.push({ kind: "ok", text: "offline a" }); });
+await page.click("#open-chats");
+await page.click("#new-chat-btn");
+await send("offline story");
+await idle();
+await page.waitForFunction(() => document.getElementById("cloud-status").classList.contains("error"), null, { timeout: 15000 });
+await openChatList();
+check("send: a chat that hasn't reached the account is marked as waiting", (await marks())["offline story"] === "↑" && (await marks()).s1 === "✓", JSON.stringify(await marks()));
+check("send: a failing sync is visible in the chats list, not only in settings", (await page.$eval("#chat-sync-status", e => e.classList.contains("error"))) && (await chatSyncText()).includes("Couldn't sync"), await chatSyncText());
+await sendChat("offline story");
+check("send: a failed send says so and keeps the chat", (await chatSyncText()).includes("Couldn't send “offline story”") && (await marks())["offline story"] === "↑" && !!(await localChats())[Object.keys(await localChats()).find(k => (k !== "s1" && k !== "s2"))], await chatSyncText());
+await page.evaluate(() => localStorage.removeItem("__skapiDown"));
+await sendChat("offline story");
+check("send: the waiting chat goes up when sent by hand", Object.values(await remoteOf(FRIEND)).some(c => texts(c) === "offline story|offline a") && (await marks())["offline story"] === "✓", await chatSyncText());
+await closeChatList();
+
+// A delete must not destroy text the deleting device never saw. Another
+// device adds to s1; this one, not having synced since, deletes s1.
+await syncNow();
+await page.click("#save-settings");
+await editRemote(FRIEND, "s1", "db.records[i].data.messages.push({ role: 'user', content: 'chapter two q' }, { role: 'assistant', content: 'chapter two a' }); db.records[i].data.updated = now; db.records[i].updated = now;");
+await openChatList();
+await page.click('.chat-row:has(.chat-title:text-is("s1")) .chat-delete');
+check("delete: setup, the chat is gone from this device", !(await localChats()).s1);
+await page.waitForFunction(() => !!localStorage.getItem("orc_chat_s1"), null, { timeout: 15000 });
+await page.waitForFunction(() => /^Synced at/.test(document.getElementById("cloud-status").textContent));
+check("delete: a chat changed elsewhere since comes back with the new text", texts((await localChats()).s1) === "s1 q|s1 a|s1 q2|s1 a2|chapter two q|chapter two a", texts((await localChats()).s1));
+check("delete: and the account's copy is not replaced by a delete", texts((await remoteOf(FRIEND)).s1) === "s1 q|s1 a|s1 q2|s1 a2|chapter two q|chapter two a" && !(await remoteOf(FRIEND)).s1.deleted, JSON.stringify((await remoteOf(FRIEND)).s1));
+check("delete: the status explains why it was kept", (await cloudStatus()).includes("1 chat deleted here had newer changes from another device, so it was kept"), await cloudStatus());
+check("delete: no stale delete is left pending", await page.evaluate(() => { const st = JSON.parse(localStorage.getItem("orc_cloud_state")); return !("s1" in st.deleted) && !("s1" in st.delStamp); }));
+
+// An ordinary delete, of the version this device knows, still travels.
+await openChatList();
+await page.click('.chat-row:has(.chat-title:text-is("s1")) .chat-delete');
+await page.waitForFunction((email) => { const db = JSON.parse(localStorage.getItem("__skapi_db")); const r = db.records.find(r => r.user_id === db.users[email].id && r.data.id === "s1"); return r && r.data.deleted === true; }, FRIEND, { timeout: 15000 });
+check("delete: an ordinary delete still reaches the account", !(await localChats()).s1 && (await remoteOf(FRIEND)).s1.deleted === true);
+await closeChatList();
+
+// Same text on both sides but under different stamps: the delete is of the
+// revision this device saw, so it travels (it must not bounce back). The
+// full sync that carries it also counts the account without that chat.
+await editRemote(FRIEND, "s2", "db.records[i].data.updated = now; db.records[i].updated = now;");
+await syncNow();
+await page.click("#save-settings");
+check("delete: setup, same text is held under different stamps", await page.evaluate(() => { const st = JSON.parse(localStorage.getItem("orc_cloud_state")); return st.rev.s2 !== st.synced.s2 && st.rev.s2 > 0; }));
+await openChatList();
+await page.click('.chat-row:has(.chat-title:text-is("s2")) .chat-delete');
+await closeChatList();
+await syncNow();
+check("delete: a chat matching the account under another stamp is still deleted there", !(await localChats()).s2 && (await remoteOf(FRIEND)).s2.deleted === true, JSON.stringify((await remoteOf(FRIEND)).s2));
+check("delete: the account count leaves out a chat just deleted", (await cloudStatus()).includes("this device has 2 chats, your account 2."), await cloudStatus());
+await page.click("#save-settings");
+
+// The listing lags and does not show another device's newer copy. The
+// delete is still checked against the record itself before it is uploaded.
+const laggedId = Object.entries(await localChats()).find(([, c]) => c.title === "offline story")[0];
+await editRemote(FRIEND, laggedId, "db.records[i].data.messages.push({ role: 'user', content: 'lagged q' }, { role: 'assistant', content: 'lagged a' }); db.records[i].data.updated = now; db.records[i].updated = now;");
+await page.evaluate((id) => localStorage.setItem("__skapiLag", id), laggedId);
+await openChatList();
+await page.click('.chat-row:has(.chat-title:text-is("offline story")) .chat-delete');
+await page.waitForFunction((id) => !!localStorage.getItem("orc_chat_" + id), laggedId, { timeout: 15000 });
+await page.waitForFunction(() => /^Synced at/.test(document.getElementById("cloud-status").textContent));
+check("delete: a newer copy the listing didn't show is still found and kept", texts((await localChats())[laggedId]) === "offline story|offline a|lagged q|lagged a" && !(await remoteOf(FRIEND))[laggedId].deleted && texts((await remoteOf(FRIEND))[laggedId]) === "offline story|offline a|lagged q|lagged a", texts((await localChats())[laggedId]));
+check("delete: and that is reported", (await cloudStatus()).includes("1 chat deleted here had newer changes from another device, so it was kept"), await cloudStatus());
+await page.evaluate(() => localStorage.removeItem("__skapiLag"));
+
+// A one-chat notice gives way to the outcome of a later sync.
+await sendChat("offline story");
+check("send: setup, a one-chat notice is showing", (await chatSyncText()).includes("“offline story”"), await chatSyncText());
+await page.evaluate(() => document.getElementById("cloud-sync-now").click());
+await page.waitForFunction(() => /^All 2 chats here are in your account/.test(document.getElementById("chat-sync-status").textContent), null, { timeout: 15000 });
+check("send: a later sync's outcome replaces the one-chat notice", (await chatSyncText()).startsWith("All 2 chats here are in your account"), await chatSyncText());
+await closeChatList();
+
+// A send that can't be merged (no room for the account's longer copy)
+// changes nothing, and leaves no marker that would let a later sync upload
+// this device's shorter copy over it.
+const entryBefore = await page.evaluate((id) => JSON.parse(localStorage.getItem("orc_cloud_state")).synced[id], laggedId);
+await page.evaluate((id) => localStorage.setItem("__quotaKey", "orc_chat_" + id), laggedId);
+await page.reload({ waitUntil: "load" });
+await page.waitForFunction(() => /^Synced at/.test(document.getElementById("cloud-status").textContent), null, { timeout: 15000 });
+await editRemote(FRIEND, laggedId, "db.records[i].data.messages.push({ role: 'user', content: 'too big q' }, { role: 'assistant', content: 'too big a' }); db.records[i].data.updated = now; db.records[i].updated = now;");
+await sendChat("offline story");
+check("send: a merge with no room is reported and changes nothing", (await chatSyncText()).includes("storage is full") && texts((await localChats())[laggedId]) === "offline story|offline a|lagged q|lagged a" && texts((await remoteOf(FRIEND))[laggedId]).endsWith("too big q|too big a"), await chatSyncText());
+check("send: a rejected merge leaves no upload marker behind", (await page.evaluate((id) => JSON.parse(localStorage.getItem("orc_cloud_state")).synced[id], laggedId)) === entryBefore && entryBefore > 0, String(entryBefore));
+await closeChatList();
+await page.evaluate(() => localStorage.removeItem("__quotaKey"));
+await page.reload({ waitUntil: "load" });
+await page.waitForFunction((id) => JSON.parse(localStorage.getItem("orc_chat_" + id) || "[]").length === 6, laggedId, { timeout: 15000 });
+check("send: once there is room the longer copy arrives intact", texts((await localChats())[laggedId]).endsWith("lagged a|too big q|too big a") && texts((await remoteOf(FRIEND))[laggedId]).endsWith("lagged a|too big q|too big a"));
+
+// Once a day everything is re-read, so a record that an incremental pull
+// would never see again still arrives.
+await page.waitForFunction(() => /^Synced at/.test(document.getElementById("cloud-status").textContent));
+const missedDevice = await takeDevice();
+await page.evaluate((email) => {
+  const db = JSON.parse(localStorage.getItem("__skapi_db"));
+  const uid = db.users[email].id;
+  db.records.push({ record_id: "rec-missed", unique_id: "orc:" + uid + ":missed", user_id: uid, table: { name: "orc_chats", access_group: "private" },
+    data: { v: 1, id: "missed", title: "missed story", created: 5, updated: 5, model: "m/x", messages: [{ role: "user", content: "missed q" }, { role: "assistant", content: "missed a" }] },
+    updated: 5, uploaded: 5 });
+  localStorage.setItem("__skapi_db", JSON.stringify(db));
+}, FRIEND);
+await putDevice(missedDevice);
+await page.waitForFunction(() => /^Synced at/.test(document.getElementById("cloud-status").textContent), null, { timeout: 15000 });
+check("recheck: an ordinary sync does not re-read old records", !(await localChats()).missed && !(await cloudStatus()).includes("Everything was checked"), await cloudStatus());
+const staleState = JSON.parse(missedDevice.orc_cloud_state);
+staleState.fullAt = Date.now() - 25 * 60 * 60 * 1000;
+await putDevice({ ...missedDevice, orc_cloud_state: JSON.stringify(staleState) });
+await page.waitForFunction(() => !!localStorage.getItem("orc_chat_missed"), null, { timeout: 15000 });
+await page.waitForFunction(() => /^Synced at/.test(document.getElementById("cloud-status").textContent));
+check("recheck: after a day everything is re-read and the missed chat arrives", texts((await localChats()).missed) === "missed q|missed a" && (await cloudStatus()).includes("Everything was checked"), await cloudStatus());
+check("recheck: the full check is remembered", await page.evaluate(() => Date.now() - JSON.parse(localStorage.getItem("orc_cloud_state")).fullAt < 60000));
+
+// An expired sign-in is visible where the chats are, not only in settings.
+const expiredDevice = await takeDevice();
+const expUser = JSON.parse(expiredDevice.orc_cloud_user);
+expUser.expired = true;
+await putDevice({ ...expiredDevice, orc_cloud_user: JSON.stringify(expUser) });
+await openChatList();
+check("expired: the chats list says chats are not syncing", (await chatSyncText()).includes("sign-in has expired, so chats are not syncing") && (await page.$eval("#chat-sync-status", e => e.classList.contains("error"))) && Object.values(await marks()).every(m => m === ""), await chatSyncText());
+await closeChatList();
+await page.evaluate(() => localStorage.removeItem("__skapiFake"));
+
 check("no page errors", errors.length === 0, JSON.stringify(errors));
 console.log(JSON.stringify(results, null, 2));
 await browser.close();
