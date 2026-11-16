@@ -32,6 +32,12 @@ just static files.
   stops any reply still streaming; the partial reply is kept in its own chat.
 - Streaming replies with a **Stop** button (partial text is kept).
 - **Retry** on any failed request, including one left dangling by a reload.
+- **Regenerate, edit, remove.** On the last exchange, ↻ asks again with
+  whichever model is chosen now (an image model can replace a text reply,
+  and the other way round), keeping the replaced reply as an earlier
+  version; ✎ puts your last message back in the composer, and sending
+  replaces it and its reply. × removes any one turn. Earlier turns can't be
+  edited, because every later reply was written in answer to them.
 - Survives being put in the background. A phone usually cuts the connection
   when you switch apps or tabs, and a page can't prevent that. If no text had
   arrived yet, the app reconnects by itself once it is back in front and

@@ -119,6 +119,19 @@ phone, so every change ships as a PR that is merged to `main`, which deploys.
   until its replacement is filed, so it must be put back on every path
   that files nothing (`restorePrior`). The continue note is API input
   only: never store or show it.
+- Regenerate (any last reply, any model kind), Edit (last user message)
+  and Remove (any turn) live in the "Changing what was said" block.
+  `refreshTailActions` puts the last-exchange buttons on by matching
+  `el._entry` to `history`, so a message element must be built from the
+  very object that is in `history`. An edit only touches the chat when the
+  edited message is sent (`applyEdit`). Removing the only message deletes
+  the chat. Pictures no message shows any more are dropped with
+  `imagePruneChat`.
+- In `cloudApply`, a chat changed here while the account still holds the
+  revision this device last saw (`rev`) is a plain update and goes up as
+  it is. Without that rule a chat made shorter here counts as "the shorter
+  side" and the removal is undone, and a regenerated reply becomes a
+  conflict copy.
 - A regenerated assistant entry carries `versions` (snapshots, the shown
   one included) and `v` (index shown). Its ordinary fields always mirror
   `versions[v]`, so the API, export, share and sync only ever see the
