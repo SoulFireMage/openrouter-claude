@@ -67,6 +67,12 @@ self.addEventListener("fetch", function (event) {
     return;
   }
 
+  // The update check reads sw.js to learn the newest version. Answering
+  // that from the cache would always report the version already installed.
+  if (event.request.cache === "no-store" || url.pathname.endsWith("/sw.js")) {
+    return;
+  }
+
   // Stale-while-revalidate: serve the cached shell immediately, refresh it in the background.
   event.respondWith(
     caches.match(event.request).then(function (cached) {

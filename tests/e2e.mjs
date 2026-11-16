@@ -1999,6 +1999,16 @@ check("version: the build number is shown and matches the service worker cache",
 await page.click("#version-check");
 await page.waitForFunction(() => /latest/.test(document.getElementById("version-text").textContent));
 check("version: checking for an update reports when this is the latest", (await page.textContent("#version-text")) === "Version " + swVersion + ". This is the latest.");
+// A copy of sw.js left in the cache must not answer the check. This one
+// claims a far newer version: believing it would start an update.
+await page.evaluate(async (v) => {
+  const cache = await caches.open("orc-shell-v" + v);
+  await cache.put(new URL("sw.js", location.href).href, new Response('const CACHE_NAME = "orc-shell-v999";', { headers: { "Content-Type": "text/javascript" } }));
+}, swVersion);
+await page.click("#version-check");
+await page.waitForFunction(() => /latest|available|Couldn't/.test(document.getElementById("version-text").textContent) && !document.getElementById("version-check").disabled);
+check("version: the check reads the live file, not a cached copy", (await page.textContent("#version-text")) === "Version " + swVersion + ". This is the latest.", await page.textContent("#version-text"));
+check("key field: hidden like a password without being a password field", (await page.$eval("#api-key", e => e.type)) === "text" && (await page.$eval("#api-key", e => getComputedStyle(e).webkitTextSecurity)) === "disc");
 await page.click("#save-settings");
 
 // The real library: vendored, loaded only when someone signs in, and

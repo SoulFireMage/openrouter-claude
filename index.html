@@ -243,6 +243,11 @@
   }
   .act-btn:active { opacity: 1; background: rgba(255, 255, 255, 0.08); }
 
+  /* The key is hidden like a password without being a password field:
+     browsers offer to save or "update" a password for any of those, and
+     this is not the account password. */
+  #api-key { -webkit-text-security: disc; }
+
   #edit-bar {
     flex-shrink: 0;
     display: flex;
@@ -1155,7 +1160,7 @@
 
     <div class="field">
       <label for="api-key">OpenRouter API key</label>
-      <input type="password" id="api-key" placeholder="sk-or-v1-…" autocomplete="off" autocapitalize="off" spellcheck="false">
+      <input type="text" id="api-key" placeholder="sk-or-v1-…" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
       <div class="hint">Stored only on this device. Get a key at <a href="https://openrouter.ai/settings/keys" target="_blank" rel="noopener">openrouter.ai/settings/keys</a>.</div>
     </div>
 
@@ -5879,7 +5884,10 @@
     var say = function (text) { versionText.textContent = "Version " + APP_VERSION + ". " + text; };
     say("Checking…");
     try {
-      var res = await fetch("sw.js", { cache: "no-store" });
+      // The query string makes this a request no cache has an answer for:
+      // an older service worker, still in charge until the update, would
+      // otherwise serve its own stored sw.js and report "the latest".
+      var res = await fetch("sw.js?check=" + Date.now(), { cache: "no-store" });
       var match = /orc-shell-v(\d+)/.exec(await res.text());
       var latest = match ? Number(match[1]) : 0;
       if (!res.ok || !latest) throw new Error("no version found");
