@@ -2154,6 +2154,59 @@ await page.waitForFunction((email) => { const db = JSON.parse(localStorage.getIt
 check("delete: an ordinary delete still reaches the account", !(await localChats()).s1 && (await remoteOf(FRIEND)).s1.deleted === true);
 await closeChatList();
 
+// Same text on both sides but under different stamps: the delete is of the
+// revision this device saw, so it travels (it must not bounce back). The
+// full sync that carries it also counts the account without that chat.
+await editRemote(FRIEND, "s2", "db.records[i].data.updated = now; db.records[i].updated = now;");
+await syncNow();
+await page.click("#save-settings");
+check("delete: setup, same text is held under different stamps", await page.evaluate(() => { const st = JSON.parse(localStorage.getItem("orc_cloud_state")); return st.rev.s2 !== st.synced.s2 && st.rev.s2 > 0; }));
+await openChatList();
+await page.click('.chat-row:has(.chat-title:text-is("s2")) .chat-delete');
+await closeChatList();
+await syncNow();
+check("delete: a chat matching the account under another stamp is still deleted there", !(await localChats()).s2 && (await remoteOf(FRIEND)).s2.deleted === true, JSON.stringify((await remoteOf(FRIEND)).s2));
+check("delete: the account count leaves out a chat just deleted", (await cloudStatus()).includes("this device has 2 chats, your account 2."), await cloudStatus());
+await page.click("#save-settings");
+
+// The listing lags and does not show another device's newer copy. The
+// delete is still checked against the record itself before it is uploaded.
+const laggedId = Object.entries(await localChats()).find(([, c]) => c.title === "offline story")[0];
+await editRemote(FRIEND, laggedId, "db.records[i].data.messages.push({ role: 'user', content: 'lagged q' }, { role: 'assistant', content: 'lagged a' }); db.records[i].data.updated = now; db.records[i].updated = now;");
+await page.evaluate((id) => localStorage.setItem("__skapiLag", id), laggedId);
+await openChatList();
+await page.click('.chat-row:has(.chat-title:text-is("offline story")) .chat-delete');
+await page.waitForFunction((id) => !!localStorage.getItem("orc_chat_" + id), laggedId, { timeout: 15000 });
+await page.waitForFunction(() => /^Synced at/.test(document.getElementById("cloud-status").textContent));
+check("delete: a newer copy the listing didn't show is still found and kept", texts((await localChats())[laggedId]) === "offline story|offline a|lagged q|lagged a" && !(await remoteOf(FRIEND))[laggedId].deleted && texts((await remoteOf(FRIEND))[laggedId]) === "offline story|offline a|lagged q|lagged a", texts((await localChats())[laggedId]));
+check("delete: and that is reported", (await cloudStatus()).includes("1 chat deleted here had newer changes from another device, so it was kept"), await cloudStatus());
+await page.evaluate(() => localStorage.removeItem("__skapiLag"));
+
+// A one-chat notice gives way to the outcome of a later sync.
+await sendChat("offline story");
+check("send: setup, a one-chat notice is showing", (await chatSyncText()).includes("“offline story”"), await chatSyncText());
+await page.evaluate(() => document.getElementById("cloud-sync-now").click());
+await page.waitForFunction(() => /^All 2 chats here are in your account/.test(document.getElementById("chat-sync-status").textContent), null, { timeout: 15000 });
+check("send: a later sync's outcome replaces the one-chat notice", (await chatSyncText()).startsWith("All 2 chats here are in your account"), await chatSyncText());
+await closeChatList();
+
+// A send that can't be merged (no room for the account's longer copy)
+// changes nothing, and leaves no marker that would let a later sync upload
+// this device's shorter copy over it.
+const entryBefore = await page.evaluate((id) => JSON.parse(localStorage.getItem("orc_cloud_state")).synced[id], laggedId);
+await page.evaluate((id) => localStorage.setItem("__quotaKey", "orc_chat_" + id), laggedId);
+await page.reload({ waitUntil: "load" });
+await page.waitForFunction(() => /^Synced at/.test(document.getElementById("cloud-status").textContent), null, { timeout: 15000 });
+await editRemote(FRIEND, laggedId, "db.records[i].data.messages.push({ role: 'user', content: 'too big q' }, { role: 'assistant', content: 'too big a' }); db.records[i].data.updated = now; db.records[i].updated = now;");
+await sendChat("offline story");
+check("send: a merge with no room is reported and changes nothing", (await chatSyncText()).includes("storage is full") && texts((await localChats())[laggedId]) === "offline story|offline a|lagged q|lagged a" && texts((await remoteOf(FRIEND))[laggedId]).endsWith("too big q|too big a"), await chatSyncText());
+check("send: a rejected merge leaves no upload marker behind", (await page.evaluate((id) => JSON.parse(localStorage.getItem("orc_cloud_state")).synced[id], laggedId)) === entryBefore && entryBefore > 0, String(entryBefore));
+await closeChatList();
+await page.evaluate(() => localStorage.removeItem("__quotaKey"));
+await page.reload({ waitUntil: "load" });
+await page.waitForFunction((id) => JSON.parse(localStorage.getItem("orc_chat_" + id) || "[]").length === 6, laggedId, { timeout: 15000 });
+check("send: once there is room the longer copy arrives intact", texts((await localChats())[laggedId]).endsWith("lagged a|too big q|too big a") && texts((await remoteOf(FRIEND))[laggedId]).endsWith("lagged a|too big q|too big a"));
+
 // Once a day everything is re-read, so a record that an incremental pull
 // would never see again still arrives.
 await page.waitForFunction(() => /^Synced at/.test(document.getElementById("cloud-status").textContent));
