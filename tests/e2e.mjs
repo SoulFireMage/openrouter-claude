@@ -41,7 +41,11 @@ const fakeFetch = () => {
         const race = JSON.parse(localStorage.getItem("__raceChat") || "null");
         if (race && race.id === v.id) { localStorage.removeItem("__raceChat"); localStorage.setItem("orc_chat" + "_" + race.id, race.json); }
       }
-      return realPut.call(this, v, ...rest);
+      const req = realPut.call(this, v, ...rest);
+      // "__chatAbort": the write is accepted and then refused at commit,
+      // which is how the database reports running out of room.
+      if (this.name === "chats" && localStorage.getItem("__chatAbort")) this.transaction.abort();
+      return req;
     };
     P.delete = function (k) { if (this.name === "chats") delete window.__chats[k]; return realDelete.call(this, k); };
     P.clear = function () { if (this.name === "chats") window.__chats = {}; return realClear.call(this); };
@@ -618,6 +622,23 @@ const migrated = await chatIndex();
 check("legacy thread migrated", migrated.length === 1 && migrated[0].title === "old thread question" && migrated[0].model === "google/gemma-3-4b-it" && migrated[0].count === 2, JSON.stringify(migrated));
 check("legacy key removed, messages shown", (await page.evaluate(() => localStorage.getItem("orc_history"))) === null && (await page.$$(".msg.assistant")).length === 1 && (await page.textContent("#chat-title")) === "old thread question");
 
+// The same move when the database refuses the write at commit: the old
+// thread is the only durable copy, so it must still be there, and the
+// retry on the next launch must not list the chat twice.
+await page.evaluate(async () => {
+  localStorage.removeItem("orc_chats"); localStorage.removeItem("orc_current_chat");
+  await window.__chatWipe();
+  localStorage.setItem("orc_history", JSON.stringify([{ role: "user", content: "old thread question" }, { role: "assistant", content: "old answer", model: "google/gemma-3-4b-it" }]));
+  localStorage.setItem("__chatAbort", "1");
+});
+await page.reload({ waitUntil: "load" });
+await page.waitForSelector(".msg.error");
+check("legacy thread is kept while its move is unconfirmed", !!(await page.evaluate(() => localStorage.getItem("orc_history"))) && Object.keys(await page.evaluate(() => window.__chatDump())).length === 0 && (await page.textContent(".msg.error")).includes("couldn't save a chat"), await page.textContent(".msg.error"));
+check("a refused write is recorded for the next launch", (await page.evaluate(() => localStorage.getItem("orc_unsaved"))) === JSON.stringify(["legacy-history"]));
+await page.evaluate(() => localStorage.removeItem("__chatAbort"));
+await page.reload({ waitUntil: "load" });
+await page.waitForFunction(() => localStorage.getItem("orc_history") === null, null, { timeout: 10000 });
+check("legacy thread moves on the next launch, listed once", (await chatIndex()).length === 1 && Object.keys(await page.evaluate(() => window.__chatDump())).join() === "legacy-history" && (await page.$$(".msg.assistant")).length === 1 && (await page.evaluate(() => localStorage.getItem("orc_unsaved"))) === null, JSON.stringify(await chatIndex()));
 
 // ---------- Profiles ----------
 // State here: current chat "old thread question" (migrated), model anthropic/claude-sonnet-4, no system prompt.

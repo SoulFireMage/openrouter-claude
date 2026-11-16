@@ -1492,14 +1492,23 @@
   function retryUnsavedChats() {
     chatRetryTimer = null;
     Object.keys(chatUnsaved).forEach(function (id) {
-      if (Object.prototype.hasOwnProperty.call(chatMirror, id)) chatWrite(id, chatMirror[id]);
-      else delete chatUnsaved[id];
+      if (!Object.prototype.hasOwnProperty.call(chatMirror, id)) { delete chatUnsaved[id]; return; }
+      // A retry that can't even start counts as refused again, which books the next one.
+      if (!chatWrite(id, chatMirror[id])) chatWriteFailed(id);
     });
   }
 
   // A write is only reported done once it is on disk, not merely handed to
   // the system: the old copy of a chat is deleted on the strength of it.
   var CHAT_TX = { durability: "strict" };
+
+  // Sends the commit along with the write. Left to itself a transaction
+  // commits only after the page has heard back about each request, and a
+  // page closed in that moment (a reply arrives, the app is swiped away)
+  // takes the write with it.
+  function commitNow(tx) {
+    try { if (typeof tx.commit === "function") tx.commit(); } catch (e) { /* it commits by itself, a moment later */ }
+  }
 
   // Writes one chat through to the database. False if it could not even be started.
   function chatWrite(id, json) {
@@ -1519,6 +1528,7 @@
         refreshChatSpace();
       };
       tx.onabort = function () { if (chatSeq[id] === seq) chatWriteFailed(id); };
+      commitNow(tx);
       return true;
     } catch (e) {
       return false;
@@ -1550,7 +1560,9 @@
     delete chatAfter[id];
     if (chatUnsaved[id]) { delete chatUnsaved[id]; noteUnsaved(); }
     try {
-      chatDb.transaction(CHAT_STORE, "readwrite", CHAT_TX).objectStore(CHAT_STORE).delete(id);
+      var tx = chatDb.transaction(CHAT_STORE, "readwrite", CHAT_TX);
+      tx.objectStore(CHAT_STORE).delete(id);
+      commitNow(tx);
     } catch (e) { /* gone from memory; the record is unreachable without its index entry */ }
     chatAnnounce(id, null);
   }
@@ -1597,6 +1609,7 @@
         records.forEach(function (r) { store.put(r); });
         tx.oncomplete = function () { resolve(true); };
         tx.onabort = function () { resolve(false); };
+        commitNow(tx);
       } catch (e) {
         resolve(false);
       }
@@ -1757,15 +1770,21 @@
   function migrateLegacyHistory() {
     var legacy = cleanMessages(readJson(KEYS.legacyHistory, []));
     if (!legacy.length) return;
-    var legacyId = newId();
+    // A fixed id: if the save below is refused after the chat was listed,
+    // the next launch fills in that same chat instead of listing another.
+    var legacyId = "legacy-history";
     var firstUser = legacy.filter(function (m) { return m.role === "user"; })[0];
     var legacyModel = legacy.filter(function (m) { return m.role === "assistant" && m.model; }).pop();
     if (saveChat(legacyId, legacy)) {
-      chats.unshift({ id: legacyId, title: titleFrom(firstUser ? firstUser.content : "Imported chat"),
-        created: Date.now(), updated: Date.now(), model: legacyModel ? legacyModel.model : "", count: legacy.length });
+      if (!chatMeta(legacyId)) {
+        chats.unshift({ id: legacyId, title: titleFrom(firstUser ? firstUser.content : "Imported chat"),
+          created: Date.now(), updated: Date.now(), model: legacyModel ? legacyModel.model : "", count: legacy.length });
+      }
       storageSet(KEYS.chats, JSON.stringify(chats));
       storageSet(KEYS.currentChat, legacyId);
-      storageRemove(KEYS.legacyHistory);
+      // The old thread is the only durable copy until the database has
+      // committed the new one, so it goes only then.
+      whenChatSaved(legacyId, function () { storageRemove(KEYS.legacyHistory); });
     }
   }
 
