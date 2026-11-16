@@ -5150,7 +5150,10 @@
       if (/not exist/i.test(errText(e))) return null;
       throw e;
     }
-    if (rec && !(await cloudUnpack(rec))) throw new Error(CLOUD_UNREADABLE);
+    if (rec && !(await cloudUnpack(rec))) {
+      cloudState.locked[id] = true;   // as the listing does: nothing may be uploaded over it
+      throw new Error(CLOUD_UNREADABLE);
+    }
     if (rec) delete cloudState.locked[id];
     return rec;
   }
@@ -5308,6 +5311,9 @@
       var gone = Object.keys(cloudState.deleted);
       for (var j = 0; j < gone.length; j++) {
         if (!still()) return;
+        // A copy this browser can't open can't be checked against the
+        // version being deleted, so the delete waits rather than replace it.
+        if (cloudState.locked[gone[j]]) continue;
         try {
           if (await cloudPushDelete(sk, userId, gone[j]) === "restored") {
             tally.restored++;
@@ -5341,10 +5347,13 @@
       if (waiting && !tally.failed) note += " " + plural(waiting, "chat") + " here " + (waiting === 1 ? "is" : "are") + " still waiting to upload.";
       if (tally.keyNeedsSignIn) note += " Your account holds an encrypted OpenRouter key. To receive it here, sign out and sign in again.";
       if (tally.keyUnreadable) note += " The key stored in your account was encrypted with an earlier password and can't be read here; enter it in settings once more.";
-      if (tally.unreadable) note += " " + plural(tally.unreadable, "large chat") + " in your account couldn't be opened by this browser, so " + (tally.unreadable === 1 ? "it was" : "they were") + " left untouched. Update the browser to receive " + (tally.unreadable === 1 ? "it" : "them") + ".";
+      // Counted from what is locked, not from this pull: a pull of recent
+      // changes may not list the record again, and the chat is still blocked.
+      var lockedN = Object.keys(cloudState.locked).length;
+      if (lockedN) note += " " + plural(lockedN, "large chat") + " in your account couldn't be opened by this browser, so " + (lockedN === 1 ? "it was" : "they were") + " left untouched. Update the browser to receive " + (lockedN === 1 ? "it" : "them") + ".";
       if (tally.full) note += " This device's storage is full, so " + plural(tally.full, "chat") + " from your account couldn't be saved here.";
       if (tally.failed) note += " " + plural(tally.failed, "change") + " couldn't be uploaded (" + tally.error + ") and will be tried again; they are safe on this device.";
-      setCloudNote(note, tally.full > 0 || tally.failed > 0 || tally.unreadable > 0 || tally.keyUnreadable);
+      setCloudNote(note, tally.full > 0 || tally.failed > 0 || lockedN > 0 || tally.keyUnreadable);
     } catch (e) {
       if (still()) {
         setCloudNote("Couldn't sync (" + errText(e) + "). Your chats are safe on this device and will sync later.", true);

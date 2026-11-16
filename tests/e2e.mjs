@@ -2296,6 +2296,33 @@ await page.waitForFunction(() => !document.getElementById("cloud-sync-now").disa
 await page.waitForTimeout(4000);   // past the debounce, in case an upload was wrongly queued
 check("large: a later sync still doesn't upload over it", (await remoteOf(BIG)).epic.z === zBefore && (await page.evaluate(() => JSON.parse(localStorage.getItem("orc_cloud_state")).locked.epic)) === true);
 
+// The lock outlives the pull that set it. A later sync that only looks at
+// recent changes doesn't list the record, yet still reports the chat as
+// blocked, and a delete queued for it waits instead of replacing it.
+const lockedDevice = await takeDevice();
+const lockedState = JSON.parse(lockedDevice.orc_cloud_state);
+lockedState.cursor = Date.now() + 600000;
+lockedState.fullAt = Date.now();
+lockedState.deleted = { epic: Date.now() };
+const lockedIndex = JSON.parse(lockedDevice.orc_chats).filter(c => c.id !== "epic");
+const { orc_chat_epic: droppedEpic, ...lockedRest } = lockedDevice;
+await putDevice({ ...lockedRest, orc_chats: JSON.stringify(lockedIndex), orc_cloud_state: JSON.stringify(lockedState) });
+await page.waitForFunction(() => /^Synced at/.test(document.getElementById("cloud-status").textContent), null, { timeout: 15000 });
+check("large: a sync that doesn't list the record still reports the blocked chat", (await cloudStatus()).includes("1 large chat in your account couldn't be opened by this browser") && !(await cloudStatus()).includes("Everything was checked") && (await page.$eval("#cloud-status", e => e.classList.contains("error"))), await cloudStatus());
+check("large: a delete queued for a chat that can't be opened waits", (await remoteOf(BIG)).epic.z === zBefore && !(await remoteOf(BIG)).epic.deleted && (await page.evaluate(() => "epic" in JSON.parse(localStorage.getItem("orc_cloud_state")).deleted)));
+
+// The listing lags and never shows the compressed record, so the upload
+// meets it only as "already taken". Fetching it then locks the chat too.
+await putDevice(dev({ epic: { messages: qa("an old short copy", "of the story"), updated: 9000 } }));
+await page.evaluate(() => { delete window.DecompressionStream; localStorage.setItem("__skapiLag", "epic"); });
+await signIn(BIG, "long-stories");
+await page.waitForFunction(() => /^Synced at/.test(document.getElementById("cloud-status").textContent), null, { timeout: 15000 });
+check("large: an unreadable copy met while uploading is locked, not replaced", (await remoteOf(BIG)).epic.z === zBefore && (await page.evaluate(() => JSON.parse(localStorage.getItem("orc_cloud_state")).locked.epic)) === true && (await cloudStatus()).includes("can't read the compressed copy"), await cloudStatus());
+await page.evaluate(() => document.getElementById("cloud-sync-now").click());
+await page.waitForFunction(() => !document.getElementById("cloud-sync-now").disabled);
+check("large: and stays unreplaced on the next sync", (await remoteOf(BIG)).epic.z === zBefore);
+await page.evaluate(() => localStorage.removeItem("__skapiLag"));
+
 // Too large even compressed: refused with a plain reason, kept locally.
 const { randomBytes } = await import("crypto");
 const noise = Array.from({ length: 10 }, (_, i) => ({ role: i % 2 ? "assistant" : "user", content: randomBytes(210000).toString("base64") }));
