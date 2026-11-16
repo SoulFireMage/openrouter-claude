@@ -51,6 +51,18 @@ just static files.
   all leave every chat on the device. Profiles sync too, default star
   included: the most recently edited copy of each wins, and deleting one
   deletes it everywhere. The Skapi library is only loaded once you sign in.
+- **See and steer what is synced.** While signed in, each chat in the chats
+  list carries a mark: ✓ in your account, ↑ not there yet. Tap the mark to
+  send that one chat now: it is merged with the account's copy (never
+  simply overwriting either side) and read back to confirm it arrived. The
+  list also says when a sync is failing or the sign-in has expired, so a
+  device that has quietly stopped syncing is obvious.
+- **Guards against a chat going missing.** Once a day (and on **Sync now**)
+  everything is re-read rather than only recent changes, and the result
+  shows how many chats the device and the account each hold. A chat the
+  account has lost is uploaded again. A delete is dropped if another device
+  added to that chat since this one last saw it, so deleting can never
+  destroy text you had not seen.
 - The build number is shown at the bottom of settings, with **Check for an
   update**, which fetches a newer build straight away instead of waiting for
   the next launch.
