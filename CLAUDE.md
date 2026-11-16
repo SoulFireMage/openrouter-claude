@@ -36,8 +36,16 @@ phone, so every change ships as a PR that is merged to `main`, which deploys.
   messages hold only `images: [{ id, type }]` references, because
   localStorage is far too small for image data.
 
+- Chat messages live in IndexedDB: database `orc_chats`, store `chats`,
+  one `{ id, json }` record per chat ("Where chats are kept" in
+  `index.html`). Every chat is also held in memory (`chatMirror`), so
+  `loadChat` and `saveChat` stay synchronous; each save is written through
+  as it is made. The chat index, settings and sync bookkeeping stay in
+  `localStorage`. Init waits for `openChatStore()` before anything about
+  chats is shown, sent or synced. Always go through `loadChat`, `saveChat`
+  and `dropChat`.
 - Accounts and sync are optional and local-first ("Account and sync" block
-  in `index.html`). `localStorage` stays the source of truth on a device;
+  in `index.html`). The device's own storage stays the source of truth on it;
   sync only merges. Accounts live in the owner's shared Skapi project
   (project id in `SKAPI_PROJECT_ID`, public by design, same one as
   `rhetoric-salle`). Each chat is one record in the private table
@@ -58,6 +66,20 @@ phone, so every change ships as a PR that is merged to `main`, which deploys.
 
 ## Things that bite
 
+- `orc_store` = `idb` records that a device has moved its chats to
+  IndexedDB. After that, a database that won't open sets
+  `chatStoreBlocked` and is reported as an error: never fall back to
+  `localStorage` there, it would show every chat as gone and sync would
+  act on that. Only a device that never moved (no IndexedDB at all) keeps
+  chats under `orc_chat_<id>` in `localStorage`.
+- A chat found under `orc_chat_<id>` after the move (a tab still on an
+  older version wrote it) is merged by `moveOldChats` on the next launch:
+  longer wins, diverged copies are both kept. An old copy is removed only
+  after the database has confirmed the write that replaces it.
+- IndexedDB reports "full" only after a write was accepted. `saveChat`
+  therefore refuses up front when the browser's estimate says it won't
+  fit, and while an earlier write is still being refused; callers rely on
+  its `false` to leave an account copy alone.
 - Inside the IIFE, `history` is the current chat's message array. Use
   `window.history` for the browser's history API.
 - Never put generated image data into the DOM as markup. Images are shown
@@ -148,7 +170,9 @@ phone, so every change ships as a PR that is merged to `main`, which deploys.
 ## localStorage keys
 
 `orc_api_key`, `orc_model`, `orc_system_prompt`, `orc_filters`,
-`orc_chats` (index) and `orc_chat_<id>` (messages), `orc_current_chat`,
+`orc_chats` (index), `orc_store` (`idb` once chats are in IndexedDB) and
+`orc_chat_<id>` (messages, only before that move or where there is no
+IndexedDB), `orc_current_chat`,
 `orc_profiles`, `orc_active_profile`, `orc_image_models` (cached image
 catalogue), `orc_image_opts` (per-model image options), `orc_cloud_user`
 (`{ id, email, expired? }` while signed in) and `orc_cloud_state` (sync
@@ -167,7 +191,11 @@ Legacy keys cleaned up on load:
 Analysis inside the page. Serve the repo on port 8765 and run it; see
 `tests/README.md`. Add checks for every behaviour change and keep it green.
 The cloud sandbox cannot reach openrouter.ai or artificialanalysis.ai, so
-the mocks are the only verification available there. Skapi is replaced by
+the mocks are the only verification available there. Chats are read, planted and
+wiped in the checks through `window.__chatGet`, `__chatSet`, `__chatDump`
+and `__chatWipe` (top of `fakeFetch`); `putDevice` plants a device's chats
+in the old `localStorage` place, so every device swap also runs the move.
+Skapi is replaced by
 an in-page fake (`fakeSkapi`), enabled per check with the `__skapiFake`
 flag; `docs.skapi.com` and the Skapi API were reachable from the sandbox in
 November 2026, so SDK behaviour can be probed for real with a throwaway

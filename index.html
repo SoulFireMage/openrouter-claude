@@ -1300,7 +1300,7 @@
   var OPENROUTER = "https://openrouter.ai/api/v1";
   // Shown in settings so it is plain which build a device is running. Keep
   // it equal to the number in sw.js's CACHE_NAME (a test checks this).
-  var APP_VERSION = 30;
+  var APP_VERSION = 31;
   var APP_TITLE = "OpenRouter Chat";
 
   /* ---------------- Storage: localStorage with in-memory fallback ---------------- */
@@ -1348,6 +1348,7 @@
     chats: "orc_chats",
     currentChat: "orc_current_chat",
     chatPrefix: "orc_chat_",
+    store: "orc_store",
     filters: "orc_filters",
     profiles: "orc_profiles",
     activeProfile: "orc_active_profile",
@@ -1391,12 +1392,266 @@
     return line.length > 48 ? line.slice(0, 47) + "…" : (line || "Untitled chat");
   }
 
+  /* ---------------- Where chats are kept ----------------
+     localStorage holds about 5 MB for the whole app, which a few long
+     stories fill. Chat messages therefore live in IndexedDB (database
+     "orc_chats", store "chats", one { id, json } record per chat), whose
+     limit is a share of the device's free disk. Settings, the chat index
+     and sync bookkeeping are small and stay in localStorage.
+
+     IndexedDB only answers asynchronously, and the rest of the app reads
+     and writes chats in the middle of ordinary synchronous code. So every
+     chat is also held in memory (chatMirror, as JSON text): loadChat and
+     saveChat work on that at once, and each save is written through to
+     the database as it is made. The app waits for the store to open, and
+     for chats from the old place to be moved, before it shows anything.
+
+     KEYS.store records that this device has moved. From then on a
+     database that won't open is an error to report, never a reason to
+     fall back to localStorage, which would look like every chat had gone.
+     Where IndexedDB doesn't exist at all, chats stay in localStorage. */
+  var CHAT_DB = "orc_chats";
+  var CHAT_STORE = "chats";
+  var chatDb = null;            // the open database; null while chats live in localStorage
+  var chatMirror = {};          // chat id -> JSON text of its messages (everything in the database)
+  var chatBooted = false;       // true once chats can be read and the first chat is on screen
+  var chatStoreBlocked = false; // moved to the database, and it can't be opened: nothing may be read or written
+  var chatSpace = null;         // { quota, usage } as last reported by the browser
+  var chatUnsaved = {};         // ids whose last write the database refused
+  var chatRetryTimer = null;
+  var chatChannel = null;
+
   function loadChat(id) {
-    return cleanMessages(readJson(KEYS.chatPrefix + id, []));
+    if (chatStoreBlocked) return [];
+    if (!chatDb) return cleanMessages(readJson(KEYS.chatPrefix + id, []));
+    if (!Object.prototype.hasOwnProperty.call(chatMirror, id)) return [];
+    try {
+      return cleanMessages(JSON.parse(chatMirror[id]));
+    } catch (e) {
+      return [];
+    }
+  }
+
+  function refreshChatSpace() {
+    try {
+      if (navigator.storage && navigator.storage.estimate) {
+        navigator.storage.estimate().then(function (est) {
+          if (est && typeof est.quota === "number" && typeof est.usage === "number") chatSpace = { quota: est.quota, usage: est.usage };
+        }, function () {});
+      }
+    } catch (e) { /* no estimate: writes are simply attempted */ }
+  }
+
+  // The database reports "full" only after the fact, so a save that
+  // plainly won't fit is refused up front, where the caller can still act.
+  function chatSpaceShort(chars) {
+    return !!chatSpace && chatSpace.usage + chars * 2 + 1024 * 1024 > chatSpace.quota;
+  }
+
+  function chatWriteFailed(id) {
+    chatUnsaved[id] = true;
+    if (!storageFullWarned) {
+      storageFullWarned = true;
+      showError("This device couldn't save a chat, most likely because its storage is full. The chat is still open here but would be lost on closing the app. Free some space, or export the chat from settings.", false);
+    }
+    if (!chatRetryTimer) chatRetryTimer = setTimeout(retryUnsavedChats, 30000);
+  }
+
+  function retryUnsavedChats() {
+    chatRetryTimer = null;
+    Object.keys(chatUnsaved).forEach(function (id) {
+      if (Object.prototype.hasOwnProperty.call(chatMirror, id)) chatWrite(id, chatMirror[id]);
+      else delete chatUnsaved[id];
+    });
+  }
+
+  // A write is only reported done once it is on disk, not merely handed to
+  // the system: the old copy of a chat is deleted on the strength of it.
+  var CHAT_TX = { durability: "strict" };
+
+  // Writes one chat through to the database. False if it could not even be started.
+  function chatWrite(id, json) {
+    try {
+      var tx = chatDb.transaction(CHAT_STORE, "readwrite", CHAT_TX);
+      tx.objectStore(CHAT_STORE).put({ id: id, json: json });
+      tx.oncomplete = function () {
+        delete chatUnsaved[id];
+        if (!Object.keys(chatUnsaved).length) storageFullWarned = false;
+        refreshChatSpace();
+      };
+      tx.onabort = function () { chatWriteFailed(id); };
+      return true;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  function chatAnnounce(id, json) {
+    try { if (chatChannel) chatChannel.postMessage({ id: id, json: json }); } catch (e) { /* other tabs catch up on reload */ }
   }
 
   function saveChat(id, messages) {
-    return storageSet(KEYS.chatPrefix + id, JSON.stringify(messages));
+    if (chatStoreBlocked) return false;
+    var json = JSON.stringify(messages);
+    if (!chatDb) return storageSet(KEYS.chatPrefix + id, json);
+    // While earlier writes are being refused, nothing new is taken on.
+    if (Object.keys(chatUnsaved).length && !chatUnsaved[id]) return false;
+    if (chatSpaceShort(json.length)) return false;
+    if (!chatWrite(id, json)) return false;
+    chatMirror[id] = json;
+    chatAnnounce(id, json);
+    return true;
+  }
+
+  function dropChat(id) {
+    if (chatStoreBlocked) return;
+    if (!chatDb) { storageRemove(KEYS.chatPrefix + id); return; }
+    delete chatMirror[id];
+    delete chatUnsaved[id];
+    try {
+      chatDb.transaction(CHAT_STORE, "readwrite", CHAT_TX).objectStore(CHAT_STORE).delete(id);
+    } catch (e) { /* gone from memory; the record is unreachable without its index entry */ }
+    chatAnnounce(id, null);
+  }
+
+  function openChatDb() {
+    return new Promise(function (resolve) {
+      var done = false;
+      var finish = function (db) { if (!done) { done = true; resolve(db); } };
+      try {
+        var req = window.indexedDB.open(CHAT_DB, 1);
+        req.onupgradeneeded = function () { req.result.createObjectStore(CHAT_STORE, { keyPath: "id" }); };
+        req.onsuccess = function () {
+          var db = req.result;
+          db.onversionchange = function () { db.close(); };
+          finish(db);
+        };
+        req.onerror = function () { finish(null); };
+        req.onblocked = function () { finish(null); };
+        setTimeout(function () { finish(null); }, 4000);
+      } catch (e) {
+        finish(null);
+      }
+    });
+  }
+
+  function chatDbAll(db) {
+    return new Promise(function (resolve, reject) {
+      try {
+        var req = db.transaction(CHAT_STORE, "readonly").objectStore(CHAT_STORE).getAll();
+        req.onsuccess = function () { resolve(req.result || []); };
+        req.onerror = function () { reject(req.error); };
+      } catch (e) {
+        reject(e);
+      }
+    });
+  }
+
+  function chatDbPutAll(db, records) {
+    return new Promise(function (resolve) {
+      if (!records.length) { resolve(true); return; }
+      try {
+        var tx = db.transaction(CHAT_STORE, "readwrite", CHAT_TX);
+        var store = tx.objectStore(CHAT_STORE);
+        records.forEach(function (r) { store.put(r); });
+        tx.oncomplete = function () { resolve(true); };
+        tx.onabort = function () { resolve(false); };
+      } catch (e) {
+        resolve(false);
+      }
+    });
+  }
+
+  function oldChatKeys() {
+    var keys = [];
+    try {
+      for (var i = 0; i < window.localStorage.length; i++) {
+        var k = window.localStorage.key(i);
+        if (k && k.indexOf(KEYS.chatPrefix) === 0 && k.length > KEYS.chatPrefix.length) keys.push(k);
+      }
+    } catch (e) { /* storage unavailable: nothing to move */ }
+    return keys;
+  }
+
+  /* Moves chats still in localStorage into the database. Normally that is
+     the one-time move of an upgrade. A copy can also turn up later, written
+     by a tab still running the previous version, so one that differs from
+     the database's is merged, never dropped: the longer wins, and two that
+     diverged are both kept. An old copy is removed only after the database
+     has confirmed the write that replaces it. */
+  async function moveOldChats(db) {
+    var keys = oldChatKeys();
+    var puts = [];
+    var settled = [];   // keys whose content is now safely in the database
+    keys.forEach(function (key) {
+      var id = key.slice(KEYS.chatPrefix.length);
+      var raw = storageGet(key);
+      var old;
+      try { old = cleanMessages(JSON.parse(raw)); } catch (e) { return; }   // unreadable: left where it is
+      if (!Object.prototype.hasOwnProperty.call(chatMirror, id)) {
+        puts.push({ id: id, json: raw, key: key });
+        return;
+      }
+      var kept;
+      try { kept = cleanMessages(JSON.parse(chatMirror[id])); } catch (e) { kept = []; }
+      if (raw === chatMirror[id] || isPrefix(old, kept)) { settled.push(key); return; }
+      if (isPrefix(kept, old)) { puts.push({ id: id, json: raw, key: key }); return; }
+      var meta = chatMeta(id);
+      var copyId = newId();
+      chats.push({ id: copyId, title: ((meta && meta.title) || "Untitled chat") + " (recovered copy)", created: (meta && meta.created) || Date.now(),
+        updated: Date.now(), model: (meta && meta.model) || "", count: old.length });
+      puts.push({ id: copyId, json: raw, key: key, copy: true });
+    });
+    var ok = await chatDbPutAll(db, puts.map(function (r) { return { id: r.id, json: r.json }; }));
+    // In memory either way, so the chats are there this session even if the
+    // database refused them; the old copies then stay for the next launch.
+    puts.forEach(function (r) { chatMirror[r.id] = r.json; });
+    if (ok) {
+      puts.forEach(function (r) { settled.push(r.key); });
+      if (puts.some(function (r) { return r.copy; })) storageSet(KEYS.chats, JSON.stringify(chats));
+    } else {
+      puts.forEach(function (r) { chatUnsaved[r.id] = true; });
+      chats = chats.filter(function (c) { return !puts.some(function (r) { return r.copy && r.id === c.id; }); });
+    }
+    if (ok) settled.forEach(storageRemove);
+    return ok;
+  }
+
+  // Resolves once chats can be read: from the database, or from
+  // localStorage where there is no database to use.
+  async function openChatStore() {
+    var moved = storageGet(KEYS.store) === "idb";
+    if (!window.indexedDB) {
+      chatStoreBlocked = moved;
+      return;
+    }
+    var db = null;
+    for (var attempt = 0; attempt < (moved ? 3 : 1) && !db; attempt++) {
+      if (attempt) await new Promise(function (r) { setTimeout(r, 500); });
+      db = await openChatDb();
+    }
+    var records = null;
+    if (db) {
+      try { records = await chatDbAll(db); } catch (e) { records = null; }
+    }
+    if (!records) {
+      chatStoreBlocked = moved;   // never moved: carry on in localStorage as before
+      return;
+    }
+    records.forEach(function (r) { if (r && typeof r.id === "string" && typeof r.json === "string") chatMirror[r.id] = r.json; });
+    await moveOldChats(db);
+    chatDb = db;
+    storageSet(KEYS.store, "idb");
+    refreshChatSpace();
+    if (Object.keys(chatUnsaved).length) chatRetryTimer = setTimeout(retryUnsavedChats, 30000);
+    try {
+      chatChannel = new BroadcastChannel("orc_chats");
+      chatChannel.onmessage = function (e) {
+        var m = e && e.data;
+        if (!m || typeof m.id !== "string") return;
+        if (typeof m.json === "string") chatMirror[m.id] = m.json; else delete chatMirror[m.id];
+      };
+    } catch (e) { /* one tab at a time, then */ }
   }
 
   var chats = readJson(KEYS.chats, []);
@@ -1404,8 +1659,9 @@
   chats = chats.filter(function (c) { return c && typeof c.id === "string"; });
 
   // One-time migration from the single-thread format.
-  var legacy = cleanMessages(readJson(KEYS.legacyHistory, []));
-  if (legacy.length) {
+  function migrateLegacyHistory() {
+    var legacy = cleanMessages(readJson(KEYS.legacyHistory, []));
+    if (!legacy.length) return;
     var legacyId = newId();
     var firstUser = legacy.filter(function (m) { return m.role === "user"; })[0];
     var legacyModel = legacy.filter(function (m) { return m.role === "assistant" && m.model; }).pop();
@@ -1418,9 +1674,9 @@
     }
   }
 
-  var currentChatId = storageGet(KEYS.currentChat) || null;
-  if (currentChatId && !chats.some(function (c) { return c.id === currentChatId; })) currentChatId = null;
-  var history = currentChatId ? loadChat(currentChatId) : [];
+  // Both are filled in once the chat store has opened (see Init).
+  var currentChatId = null;
+  var history = [];
   var storageFullWarned = false;
 
   var isStreaming = false;
@@ -2131,7 +2387,7 @@
     var meta = chatMeta(id);
     if (!meta) return;
     if (!confirm("Delete \"" + meta.title + "\"? This can't be undone.")) return;
-    storageRemove(KEYS.chatPrefix + id);
+    dropChat(id);
     imageDeleteChat(id);
     chats = chats.filter(function (c) { return c.id !== id; });
     storageSet(KEYS.chats, JSON.stringify(chats));
@@ -2444,7 +2700,9 @@
   }
 
   function updateComposerEnabled() {
-    var ready = !!storageGet(KEYS.apiKey) && !!storageGet(KEYS.model);
+    // Not before the chat store has opened: a message sent earlier would
+    // be filed against a chat that hasn't been read yet.
+    var ready = chatBooted && !chatStoreBlocked && !!storageGet(KEYS.apiKey) && !!storageGet(KEYS.model);
     composerEl.disabled = !ready;
     sendBtn.disabled = !ready && !isStreaming;
     var imageMode = ready && isImageModel(storageGet(KEYS.model));
@@ -4851,7 +5109,7 @@
       // Changes made here that were never uploaded outrank a delete made
       // elsewhere: the chat stays and is uploaded again.
       if (cloudDirty(meta)) return "kept";
-      storageRemove(KEYS.chatPrefix + id);
+      dropChat(id);
       imageDeleteChat(id);
       chats = chats.filter(function (c) { return c.id !== id; });
       delete cloudState.synced[id];
@@ -4925,7 +5183,7 @@
     if (wasCurrent) currentChatId = copyId;       // before storing, so the screen stays on the copy
     if (!cloudStore(d, remote)) {
       // No room for the account's version: undo the copy and try again later.
-      storageRemove(KEYS.chatPrefix + copyId);
+      dropChat(copyId);
       chats = chats.filter(function (c) { return c.id !== copyId; });
       if (wasCurrent) currentChatId = id;
       return "full";
@@ -5929,18 +6187,37 @@
     });
   }
 
-  /* ---------------- Init ---------------- */
+  /* ---------------- Init ----------------
+     Nothing about chats is shown, sent or synced until the chat store is
+     open and any chats from the old place have been moved into it. */
   updateModelLabel(chosenModel);
-  updateChatTitle();
-  renderHistory();
-  updateComposerEnabled();
   renderCloud();
   KEYS.legacyAA.forEach(storageRemove);
   updateAAStatus();
-  var savedKeyOnLoad = storageGet(KEYS.apiKey);
-  if (savedKeyOnLoad) fetchModels(savedKeyOnLoad);
   loadAAScores();
-  cloudResume();
+  openChatStore().catch(function () {
+    // An unexpected failure while opening: same rule as a database that won't open.
+    chatStoreBlocked = storageGet(KEYS.store) === "idb";
+  }).then(function () {
+    if (chatStoreBlocked) {
+      messagesEl.innerHTML = "";
+      showError("This device's chat storage couldn't be opened, so your chats can't be shown or saved just now. They have not been deleted. Close any other tabs or windows of this app, then reload.", false);
+      return;
+    }
+    migrateLegacyHistory();
+    currentChatId = storageGet(KEYS.currentChat) || null;
+    if (currentChatId && !chats.some(function (c) { return c.id === currentChatId; })) currentChatId = null;
+    history = currentChatId ? loadChat(currentChatId) : [];
+    chatBooted = true;
+    if (chatDb && chats.length) requestPersistentStorage();
+    updateChatTitle();
+    renderHistory();
+    updateComposerEnabled();
+    renderCloud();
+    var savedKeyOnLoad = storageGet(KEYS.apiKey);
+    if (savedKeyOnLoad) fetchModels(savedKeyOnLoad);
+    cloudResume();
+  });
 })();
 </script>
 </body>

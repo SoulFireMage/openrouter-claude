@@ -63,6 +63,12 @@ just static files.
   simply overwriting either side) and read back to confirm it arrived. The
   list also says when a sync is failing or the sign-in has expired, so a
   device that has quietly stopped syncing is obvious.
+- **Room for long stories on the device.** Chats are kept in the browser's
+  database (IndexedDB), whose limit is a share of the device's free disk,
+  not in `localStorage`, which holds about 5 MB for a whole site and which
+  a few long stories fill. A device that used an earlier version moves its
+  chats across on first launch, and removes the old copies only once the
+  new ones are confirmed written. Settings stay where they were.
 - **Long stories sync.** The account store refuses any single record over
   2 MB, which one long story can pass. Chats over 256 KB are compressed
   before upload (prose shrinks to about a third), which lifts the ceiling to

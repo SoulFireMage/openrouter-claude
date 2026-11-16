@@ -32,5 +32,5 @@ check for every behaviour change; the mocks at the top of the file show the
 shapes of the OpenRouter and Artificial Analysis responses the app expects.
 
 The sync checks imitate several devices by swapping the app's `orc_*` keys in
-`localStorage` (`takeDevice` / `putDevice`) while the fake Skapi "server"
+`localStorage` and its chats in IndexedDB (`takeDevice` / `putDevice`) while the fake Skapi "server"
 keeps its records under `__skapi_db`.
