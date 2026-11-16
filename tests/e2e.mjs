@@ -2420,6 +2420,25 @@ check("edit: the request carries the new text, not the old", (await page.evaluat
 await page.waitForTimeout(300);
 check("edit: pictures of the replaced reply are cleared out", imagesBeforeEdit === 1 && (await idbCount()) === 1, imagesBeforeEdit + " -> " + (await idbCount()));
 
+// With storage full the edited chat can't be saved, so the stored copy
+// still shows the old reply: its picture must not be deleted.
+await page.evaluate(() => {
+  window.__realSetItem = Storage.prototype.setItem;
+  Storage.prototype.setItem = function (k, v) {
+    if (String(k).startsWith("orc_chat")) throw new DOMException("Quota exceeded", "QuotaExceededError");
+    return window.__realSetItem.call(this, k, v);
+  };
+});
+await clickAct("user", "Edit");
+await page.fill("#composer", "draw a bear");
+await page.click("#send-btn");
+await idle();
+await page.waitForTimeout(300);
+check("edit: with storage full the stored reply keeps its picture", (await idbCount()) === 2 && (await curChat())[2].content === "draw a wolf", String(await idbCount()));
+await page.evaluate(() => { Storage.prototype.setItem = window.__realSetItem; });
+await page.reload({ waitUntil: "load" });
+await page.waitForTimeout(300);
+
 // Remove: any one turn, here an earlier reply.
 await page.evaluate(() => document.querySelectorAll(".msg.assistant")[0].querySelector(".act-remove").click());
 chatNow = await curChat();
@@ -2462,12 +2481,25 @@ await page.waitForFunction((email) => { const db = JSON.parse(localStorage.getIt
 await syncNow();
 check("sync: a regenerated reply is an update, not a conflict", Object.keys(await localChats()).length === 1 && texts((await localChats()).t1) === "t1 q|t1 a|t1 q2|t1 a2 third" && Object.keys(await remoteOf(EDITOR)).length === 1 && !(await cloudStatus()).includes("two places"), (await cloudStatus()) + JSON.stringify(Object.keys(await localChats())));
 await page.click("#save-settings");
+// The chat changes under an open edit (a sync brings in another device's
+// additions). Sending then must not add the text as a new turn.
+await clickAct("user", "Edit");
+await editRemote(EDITOR, "t1", "db.records[i].data.messages.push({ role: 'user', content: 't1 q3' }, { role: 'assistant', content: 't1 a3' }); db.records[i].data.updated = now; db.records[i].updated = now;");
+await page.evaluate(() => document.getElementById("cloud-sync-now").click());
+await page.waitForFunction(() => JSON.parse(localStorage.getItem("orc_chat_t1")).length === 6, null, { timeout: 15000 });
+const requestsBeforeStale = await page.evaluate(() => window.__requests.length);
+await page.fill("#composer", "edited too late");
+await page.click("#send-btn");
+await page.waitForSelector(".msg.error");
+check("edit: a chat changed under the edit sends nothing and keeps the text", (await page.textContent(".msg.error")).includes("changed while you were editing") && (await page.inputValue("#composer")) === "edited too late" && (await page.evaluate(() => window.__requests.length)) === requestsBeforeStale && texts((await localChats()).t1) === "t1 q|t1 a|t1 q2|t1 a2 third|t1 q3|t1 a3" && (await page.$eval("#edit-bar", e => e.hidden)), await page.textContent(".msg.error"));
+await page.fill("#composer", "");
+await page.waitForFunction(() => /^Synced at/.test(document.getElementById("cloud-status").textContent));
 // Another device, unchanged, simply takes the edited chat.
 const editorDevice = await takeDevice();
 await putDevice(dev({ t1: { messages: qa("t1 q", "t1 a", "t1 q2", "t1 a2"), updated: 1000 } }));
 await signIn(EDITOR, "edit-pass");
 await synced();
-check("sync: another device with the old copy keeps both rather than guessing", Object.values(await localChats()).map(texts).sort().join(" / ") === "t1 q|t1 a|t1 q2|t1 a2 / t1 q|t1 a|t1 q2|t1 a2 third", JSON.stringify(Object.values(await localChats()).map(texts)));
+check("sync: another device with the old copy keeps both rather than guessing", Object.values(await localChats()).map(texts).sort().join(" / ") === "t1 q|t1 a|t1 q2|t1 a2 / t1 q|t1 a|t1 q2|t1 a2 third|t1 q3|t1 a3", JSON.stringify(Object.values(await localChats()).map(texts)));
 await putDevice(dev({}));
 await page.evaluate(() => localStorage.removeItem("__skapiFake"));
 

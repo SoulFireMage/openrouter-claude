@@ -1857,8 +1857,7 @@
     if (!confirm("Remove " + what + " from the chat? This can't be undone.")) return;
     if (editing) cancelEdit(false);
     history.splice(at, 1);
-    persistHistory();
-    imagePruneChat(currentChatId);
+    if (persistHistory()) imagePruneChat(currentChatId);   // only once the chat without it is stored
     renderHistory();
   }
 
@@ -2010,6 +2009,7 @@
       showError("This device's storage is full, so this chat isn't being saved. Delete some old chats to make room.", false);
     }
     cloudTouch();
+    return ok;
   }
 
   /* ---------------- Chats ---------------- */
@@ -3786,15 +3786,24 @@
     removeTransient();
 
     if (!retrying) {
-      // An edited message replaces the old one and the reply it got.
-      if (editing && applyEdit()) {
-        imagePruneChat(currentChatId);
+      // An edited message replaces the old one and the reply it got. If
+      // the chat changed under the edit (a sync brought in another copy),
+      // nothing is sent: the text would land as a new turn beside the
+      // message it was meant to replace.
+      var edited = !!editing;
+      if (edited) {
+        if (!applyEdit()) {
+          showError("This chat changed while you were editing, so nothing was sent. Your text is still in the box: look over the chat, then send it or edit again.", false);
+          return;
+        }
         renderHistory();
         removeTransient();
       }
       var mine = { role: "user", content: text };
       history.push(mine);
-      persistHistory();
+      // Pictures of the replaced reply go only once the chat without them
+      // is safely stored; if that failed, the stored copy still shows them.
+      if (persistHistory() && edited) imagePruneChat(currentChatId);
       appendMessageEl(mine);
       composerEl.value = "";
       composerEl.style.height = "auto";
