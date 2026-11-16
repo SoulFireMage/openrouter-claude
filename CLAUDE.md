@@ -88,6 +88,14 @@ phone, so every change ships as a PR that is merged to `main`, which deploys.
   has made is merged as a conflict, never taken as a plain update. A chat
   whose account copy could not be merged in (storage full, busy) must not
   be uploaded in that sync.
+- Skapi (its SDK, before sending) refuses record data over 2 MB: "Data
+  should not exceed 2MB". A chat whose messages are over `CLOUD_ZIP_OVER`
+  is uploaded with them gzipped and base64 encoded in `z` (count in `zn`)
+  instead of `messages`; `cloudUnpack` restores `messages` on every record
+  read (`cloudSync`'s list, `cloudGet`). A record that can't be unpacked is
+  never applied and never uploaded over (`locked` in `orc_cloud_state`).
+  Versions before 29 ignore a record without `messages`. Read account
+  records through `cloudGet`, not `sk.getRecords` directly.
 - An incremental pull only sees records changed since `cursor`, so a
   record it misses once is never seen again. `cloudSync` therefore turns
   itself into a full pull when `fullAt` in `orc_cloud_state` is over a day

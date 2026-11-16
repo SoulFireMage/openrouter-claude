@@ -57,6 +57,11 @@ just static files.
   simply overwriting either side) and read back to confirm it arrived. The
   list also says when a sync is failing or the sign-in has expired, so a
   device that has quietly stopped syncing is obvious.
+- **Long stories sync.** The account store refuses any single record over
+  2 MB, which one long story can pass. Chats over 256 KB are compressed
+  before upload (prose shrinks to about a third), which lifts the ceiling to
+  roughly what the device itself can hold. A chat too large even then is
+  refused with the sizes stated, and stays on the device.
 - **Guards against a chat going missing.** Once a day (and on **Sync now**)
   everything is re-read rather than only recent changes, and the result
   shows how many chats the device and the account each hold. A chat the
