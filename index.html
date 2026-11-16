@@ -1259,7 +1259,7 @@
   var OPENROUTER = "https://openrouter.ai/api/v1";
   // Shown in settings so it is plain which build a device is running. Keep
   // it equal to the number in sw.js's CACHE_NAME (a test checks this).
-  var APP_VERSION = 28;
+  var APP_VERSION = 29;
   var APP_TITLE = "OpenRouter Chat";
 
   /* ---------------- Storage: localStorage with in-memory fallback ---------------- */
@@ -4516,7 +4516,7 @@
   function freshCloudState(userId) {
     return { user: userId || "", cursor: 0, synced: {}, deleted: {}, profiles: NO_PROFILES, goneProfiles: {},
       keySync: false, keyPrint: "", keyRemove: false, keyDeclined: false, keyOptAt: 0,
-      dev: newId(), vv: {}, delStamp: {}, rev: {}, fullAt: 0 };
+      dev: newId(), vv: {}, delStamp: {}, rev: {}, locked: {}, fullAt: 0 };
   }
 
   function readCloudState() {
@@ -4536,6 +4536,7 @@
     if (!st.vv || typeof st.vv !== "object") st.vv = {};
     if (!st.delStamp || typeof st.delStamp !== "object") st.delStamp = {};
     if (!st.rev || typeof st.rev !== "object") st.rev = {};
+    if (!st.locked || typeof st.locked !== "object") st.locked = {};
     if (typeof st.fullAt !== "number") st.fullAt = 0;
     return st;
   }
@@ -5002,6 +5003,67 @@
     renderCloud();
   }
 
+  /* ----- Large chats -----
+     Skapi refuses a record whose data is over 2 MB, which one long story
+     can pass. A chat over CLOUD_ZIP_OVER is therefore uploaded with its
+     messages gzipped and base64 encoded in "z" instead of "messages":
+     prose shrinks to roughly a third, which lifts the ceiling to about
+     what a device's own storage can hold. Smaller chats stay as they
+     were, so most records are unchanged. A version of the app from before
+     this ignores a record without "messages", so it never damages one. */
+  var CLOUD_ZIP_OVER = 256 * 1024;
+  var CLOUD_RECORD_MAX = 2 * 1024 * 1024;
+
+  function byteLength(text) {
+    return new Blob([text]).size;
+  }
+
+  function megabytes(bytes) {
+    return (bytes / (1024 * 1024)).toFixed(1) + " MB";
+  }
+
+  async function gzipToBase64(text) {
+    var stream = new Blob([text]).stream().pipeThrough(new CompressionStream("gzip"));
+    var bytes = new Uint8Array(await new Response(stream).arrayBuffer());
+    var out = "";
+    for (var i = 0; i < bytes.length; i += 0x8000) out += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+    return btoa(out);
+  }
+
+  async function gunzipFromBase64(b64) {
+    var bin = atob(b64);
+    var bytes = new Uint8Array(bin.length);
+    for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    var stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream("gzip"));
+    return new Response(stream).text();
+  }
+
+  // How a chat's messages go into its record: { messages } as they are,
+  // or { z, zn } when they are large and this browser can compress.
+  async function cloudPack(messages) {
+    var json = JSON.stringify(messages);
+    if (typeof CompressionStream !== "function" || byteLength(json) <= CLOUD_ZIP_OVER) return { messages: messages };
+    return { z: await gzipToBase64(json), zn: messages.length };
+  }
+
+  // Puts "messages" back on a record that carries them compressed. False
+  // if they can't be read here (no decompression in this browser, or a
+  // damaged copy): such a record must be left alone, never uploaded over.
+  async function cloudUnpack(rec) {
+    var d = rec && rec.data;
+    if (!d || typeof d !== "object" || typeof d.z !== "string") return true;
+    try {
+      var messages = JSON.parse(await gunzipFromBase64(d.z));
+      if (!Array.isArray(messages)) return false;
+      d.messages = messages;
+      return true;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  var CLOUD_UNREADABLE = "this browser can't read the compressed copy in your account";
+
   /* ----- Talking to Skapi ----- */
   async function cloudList(sk, since) {
     var query = { table: CLOUD_TABLE };
@@ -5048,8 +5110,16 @@
       var vv = {};
       Object.keys(cloudState.vv[id] || {}).forEach(function (dev) { vv[dev] = cloudState.vv[id][dev]; });
       vv[cloudState.dev] = (vv[cloudState.dev] || 0) + 1;
-      var res = await cloudPut(sk, userId, id, { v: 1, id: id, title: meta.title || "", created: meta.created || stamp,
-        updated: stamp, model: meta.model || "", messages: messages, vv: vv });
+      var data = { v: 1, id: id, title: meta.title || "", created: meta.created || stamp,
+        updated: stamp, model: meta.model || "", vv: vv };
+      var packed = await cloudPack(messages);
+      Object.keys(packed).forEach(function (k) { data[k] = packed[k]; });
+      var size = byteLength(JSON.stringify(data));
+      if (size > CLOUD_RECORD_MAX) {
+        throw new Error("\u201c" + (meta.title || "Untitled chat") + "\u201d is too large to sync: " + megabytes(size) +
+          (packed.z ? " even compressed" : "") + ", and the limit is " + megabytes(CLOUD_RECORD_MAX));
+      }
+      var res = await cloudPut(sk, userId, id, data);
       if (res !== "taken") {
         cloudState.synced[id] = stamp;
         cloudState.vv[id] = vv;
@@ -5061,8 +5131,7 @@
       }
       // The account already has a chat with this id that the pull did not
       // show. Merge it like any other, then upload whatever is still new.
-      var got = await sk.getRecords({ unique_id: cloudUid(userId, id) });
-      var rec = got && Array.isArray(got.list) ? got.list[0] : null;
+      var rec = await cloudGet(sk, userId, id);
       var merged = rec ? cloudApply(rec) : "";
       if (merged === "copied") cloudAgain = true;   // the copy goes up on the next pass
       if (merged === "full" || merged === "later") return false;   // not merged, so it must not be overwritten
@@ -5071,15 +5140,22 @@
     return false;
   }
 
-  // The account's record for one chat, or null if it has none.
+  // The account's record for one chat, or null if it has none. Throws if
+  // the record is there but its compressed messages can't be read here.
   async function cloudGet(sk, userId, id) {
     try {
       var got = await sk.getRecords({ unique_id: cloudUid(userId, id) });
-      return (got && Array.isArray(got.list) && got.list[0]) || null;
+      var rec = (got && Array.isArray(got.list) && got.list[0]) || null;
     } catch (e) {
       if (/not exist/i.test(errText(e))) return null;
       throw e;
     }
+    if (rec && !(await cloudUnpack(rec))) {
+      cloudState.locked[id] = true;   // as the listing does: nothing may be uploaded over it
+      throw new Error(CLOUD_UNREADABLE);
+    }
+    if (rec) delete cloudState.locked[id];
+    return rec;
   }
 
   // Uploads a pending delete. The listing can lag behind a write, so the
@@ -5137,7 +5213,7 @@
     chatSyncNote = null;   // this sync's outcome is the news now, not an earlier one-chat send
     var userId = cloudUser.id;
     var still = function () { return cloudActive() && cloudUser.id === userId; };
-    var tally = { pulled: 0, pushed: 0, copied: 0, removed: 0, restored: 0, full: 0, failed: 0, error: "", profiles: false, key: "", keyUnreadable: false, keyNeedsSignIn: false };
+    var tally = { pulled: 0, pushed: 0, copied: 0, removed: 0, restored: 0, unreadable: 0, full: 0, failed: 0, error: "", profiles: false, key: "", keyUnreadable: false, keyNeedsSignIn: false };
     var sk = null;
     setCloudNote("Syncing…");
     try {
@@ -5151,7 +5227,24 @@
       var pulledKey = null;
       var inAccount = {};  // ids of the chats the account holds, gathered on a full pull
       var blocked = {};   // chats whose account copy could not be merged in: never upload over those
-      list.forEach(function (rec) {
+      var unreadable = [];
+      for (var u = 0; u < list.length; u++) unreadable.push(!(await cloudUnpack(list[u])));
+      if (!still()) return;
+      list.forEach(function (rec, at) {
+        if (unreadable[at]) {
+          // Compressed, and it can't be opened here. Leave it exactly as it
+          // is, and remember not to upload over it: a later pull that only
+          // looks at recent changes would not show it again.
+          tally.unreadable++;
+          if (rec.data && typeof rec.data.id === "string") {
+            seen[rec.data.id] = true;
+            inAccount[rec.data.id] = true;
+            cloudState.locked[rec.data.id] = true;
+          }
+          if (typeof rec.updated === "number" && rec.updated > newest) newest = rec.updated;
+          return;
+        }
+        if (rec && rec.data && typeof rec.data.id === "string") delete cloudState.locked[rec.data.id];
         if (rec && rec.data && rec.data.kind === "key") pulledKey = rec.data;
         if (rec && rec.data && rec.data.kind === "profiles") {
           var before = cloudProfilesKey();
@@ -5189,7 +5282,7 @@
       var pending = chats.filter(cloudDirty).map(function (c) { return c.id; });
       for (var i = 0; i < pending.length; i++) {
         if (!still()) return;
-        if (blocked[pending[i]]) continue;
+        if (blocked[pending[i]] || cloudState.locked[pending[i]]) continue;
         if (isStreaming && pending[i] === currentChatId) { cloudAgain = true; continue; }
         try {
           if (await cloudPushChat(sk, userId, pending[i])) { tally.pushed++; inAccount[pending[i]] = true; }
@@ -5218,6 +5311,9 @@
       var gone = Object.keys(cloudState.deleted);
       for (var j = 0; j < gone.length; j++) {
         if (!still()) return;
+        // A copy this browser can't open can't be checked against the
+        // version being deleted, so the delete waits rather than replace it.
+        if (cloudState.locked[gone[j]]) continue;
         try {
           if (await cloudPushDelete(sk, userId, gone[j]) === "restored") {
             tally.restored++;
@@ -5251,9 +5347,13 @@
       if (waiting && !tally.failed) note += " " + plural(waiting, "chat") + " here " + (waiting === 1 ? "is" : "are") + " still waiting to upload.";
       if (tally.keyNeedsSignIn) note += " Your account holds an encrypted OpenRouter key. To receive it here, sign out and sign in again.";
       if (tally.keyUnreadable) note += " The key stored in your account was encrypted with an earlier password and can't be read here; enter it in settings once more.";
+      // Counted from what is locked, not from this pull: a pull of recent
+      // changes may not list the record again, and the chat is still blocked.
+      var lockedN = Object.keys(cloudState.locked).length;
+      if (lockedN) note += " " + plural(lockedN, "large chat") + " in your account couldn't be opened by this browser, so " + (lockedN === 1 ? "it was" : "they were") + " left untouched. Update the browser to receive " + (lockedN === 1 ? "it" : "them") + ".";
       if (tally.full) note += " This device's storage is full, so " + plural(tally.full, "chat") + " from your account couldn't be saved here.";
       if (tally.failed) note += " " + plural(tally.failed, "change") + " couldn't be uploaded (" + tally.error + ") and will be tried again; they are safe on this device.";
-      setCloudNote(note, tally.full > 0 || tally.failed > 0 || tally.keyUnreadable);
+      setCloudNote(note, tally.full > 0 || tally.failed > 0 || lockedN > 0 || tally.keyUnreadable);
     } catch (e) {
       if (still()) {
         setCloudNote("Couldn't sync (" + errText(e) + "). Your chats are safe on this device and will sync later.", true);

@@ -265,6 +265,8 @@ const fakeSkapi = () => {
       await this.net("postRecord");
       const db = load();
       const me = this.me(db);
+      // The SDK refuses larger data before sending anything.
+      if (new Blob([JSON.stringify(data)]).size > 2 * 1024 * 1024) throw err("INVALID_REQUEST", "Data should not exceed 2MB");
       if (cfg.record_id) {
         const r = db.records.find(r => r.record_id === cfg.record_id || r.unique_id === cfg.record_id);
         if (!r || r.user_id !== me.id) throw err("INVALID_REQUEST", "User has no access to update this record.");
@@ -2238,6 +2240,102 @@ await putDevice({ ...expiredDevice, orc_cloud_user: JSON.stringify(expUser) });
 await openChatList();
 check("expired: the chats list says chats are not syncing", (await chatSyncText()).includes("sign-in has expired, so chats are not syncing") && (await page.$eval("#chat-sync-status", e => e.classList.contains("error"))) && Object.values(await marks()).every(m => m === ""), await chatSyncText());
 await closeChatList();
+await page.evaluate(() => localStorage.removeItem("__skapiFake"));
+
+// ---------- Sync: chats too large for one plain record ----------
+// Skapi refuses record data over 2 MB (the fake does the same), so a long
+// story is uploaded compressed.
+await page.evaluate(() => {
+  ["__skapiDown", "__skapiLag", "__skapiPage", "__quotaKey"].forEach(k => localStorage.removeItem(k));
+  localStorage.setItem("__skapiFake", "1");
+});
+const BIG = "big@example.com";
+const prose = (n) => Array.from({ length: 900 }, (_, i) => "Chapter " + n + ", line " + i + ": the lighthouse keeper climbed the stairs again, counting each worn step.").join("\n");
+const epicMessages = Array.from({ length: 30 }, (_, i) => ({ role: i % 2 ? "assistant" : "user", content: prose(i) }));
+const epicBytes = Buffer.byteLength(JSON.stringify(epicMessages));
+check("large: setup, the story is over the 2 MB record limit", epicBytes > 2 * 1024 * 1024 && epicBytes < 3 * 1024 * 1024, String(epicBytes));
+await putDevice(dev({ epic: { messages: epicMessages, updated: 5000 }, note: { messages: qa("short q", "short a"), updated: 4000 } }));
+await signIn(BIG, "long-stories", true);
+await synced();
+let bigRemote = await remoteOf(BIG);
+check("large: a chat over the limit uploads, compressed", typeof bigRemote.epic.z === "string" && !bigRemote.epic.messages && bigRemote.epic.zn === 30 && JSON.stringify(bigRemote.epic).length < 2 * 1024 * 1024 && (await cloudStatus()).includes("2 chats uploaded") && !(await page.$eval("#cloud-status", e => e.classList.contains("error"))), (await cloudStatus()) + " " + JSON.stringify(bigRemote.epic).length);
+check("large: a small chat is uploaded as before", texts(bigRemote.note) === "short q|short a" && bigRemote.note.z === undefined);
+await page.click("#save-settings");
+await sendChat("epic");
+check("large: sending it by hand reads the compressed copy back and matches", (await chatSyncText()).includes("is already in your account and matches this device (30 messages)"), await chatSyncText());
+await closeChatList();
+
+// Another device receives it whole.
+await putDevice(dev({}));
+await signIn(BIG, "long-stories");
+await page.waitForFunction(() => !!localStorage.getItem("orc_chat_epic"), null, { timeout: 15000 });
+await synced();
+check("large: another device receives the story intact", (await page.evaluate(() => localStorage.getItem("orc_chat_epic"))) === JSON.stringify(epicMessages) && texts((await localChats()).note) === "short q|short a");
+
+// It grows there and goes back up, still compressed.
+await page.click("#save-settings");
+await page.click("#open-chats");
+await page.click('.chat-row:has(.chat-title:text-is("epic")) .chat-open');
+await page.evaluate(() => window.__scenarios.push({ kind: "ok", text: "and then the lamp went out" }));
+await send("what happened next?");
+await page.waitForFunction((email) => { const db = JSON.parse(localStorage.getItem("__skapi_db")); const r = db.records.find(r => r.user_id === db.users[email].id && r.data.id === "epic"); return r && r.data.zn === 32; }, BIG, { timeout: 20000 });
+check("large: a reply added to it uploads compressed too", typeof (await remoteOf(BIG)).epic.z === "string" && !(await remoteOf(BIG)).epic.messages);
+await page.waitForFunction(() => /^Synced at/.test(document.getElementById("cloud-status").textContent));
+
+// A browser that can't decompress leaves the account's copy alone, and
+// does not upload its own copy of that chat over it.
+const zBefore = (await remoteOf(BIG)).epic.z;
+await putDevice(dev({ epic: { messages: qa("an old short copy", "of the story"), updated: 9000 } }));
+await page.evaluate(() => { delete window.DecompressionStream; });
+await signIn(BIG, "long-stories");
+await page.waitForFunction(() => /^Synced at/.test(document.getElementById("cloud-status").textContent), null, { timeout: 15000 });
+check("large: a browser that can't open it says so", (await cloudStatus()).includes("1 large chat in your account couldn't be opened by this browser") && (await page.$eval("#cloud-status", e => e.classList.contains("error"))), await cloudStatus());
+check("large: and neither side is touched", (await remoteOf(BIG)).epic.z === zBefore && texts((await localChats()).epic) === "an old short copy|of the story");
+await page.evaluate(() => document.getElementById("cloud-sync-now").click());
+await page.waitForFunction(() => !document.getElementById("cloud-sync-now").disabled);
+await page.waitForTimeout(4000);   // past the debounce, in case an upload was wrongly queued
+check("large: a later sync still doesn't upload over it", (await remoteOf(BIG)).epic.z === zBefore && (await page.evaluate(() => JSON.parse(localStorage.getItem("orc_cloud_state")).locked.epic)) === true);
+
+// The lock outlives the pull that set it. A later sync that only looks at
+// recent changes doesn't list the record, yet still reports the chat as
+// blocked, and a delete queued for it waits instead of replacing it.
+const lockedDevice = await takeDevice();
+const lockedState = JSON.parse(lockedDevice.orc_cloud_state);
+lockedState.cursor = Date.now() + 600000;
+lockedState.fullAt = Date.now();
+lockedState.deleted = { epic: Date.now() };
+const lockedIndex = JSON.parse(lockedDevice.orc_chats).filter(c => c.id !== "epic");
+const { orc_chat_epic: droppedEpic, ...lockedRest } = lockedDevice;
+await putDevice({ ...lockedRest, orc_chats: JSON.stringify(lockedIndex), orc_cloud_state: JSON.stringify(lockedState) });
+await page.waitForFunction(() => /^Synced at/.test(document.getElementById("cloud-status").textContent), null, { timeout: 15000 });
+check("large: a sync that doesn't list the record still reports the blocked chat", (await cloudStatus()).includes("1 large chat in your account couldn't be opened by this browser") && !(await cloudStatus()).includes("Everything was checked") && (await page.$eval("#cloud-status", e => e.classList.contains("error"))), await cloudStatus());
+check("large: a delete queued for a chat that can't be opened waits", (await remoteOf(BIG)).epic.z === zBefore && !(await remoteOf(BIG)).epic.deleted && (await page.evaluate(() => "epic" in JSON.parse(localStorage.getItem("orc_cloud_state")).deleted)));
+
+// The listing lags and never shows the compressed record, so the upload
+// meets it only as "already taken". Fetching it then locks the chat too.
+await putDevice(dev({ epic: { messages: qa("an old short copy", "of the story"), updated: 9000 } }));
+await page.evaluate(() => { delete window.DecompressionStream; localStorage.setItem("__skapiLag", "epic"); });
+await signIn(BIG, "long-stories");
+await page.waitForFunction(() => /^Synced at/.test(document.getElementById("cloud-status").textContent), null, { timeout: 15000 });
+check("large: an unreadable copy met while uploading is locked, not replaced", (await remoteOf(BIG)).epic.z === zBefore && (await page.evaluate(() => JSON.parse(localStorage.getItem("orc_cloud_state")).locked.epic)) === true && (await cloudStatus()).includes("can't read the compressed copy"), await cloudStatus());
+await page.evaluate(() => document.getElementById("cloud-sync-now").click());
+await page.waitForFunction(() => !document.getElementById("cloud-sync-now").disabled);
+check("large: and stays unreplaced on the next sync", (await remoteOf(BIG)).epic.z === zBefore);
+await page.evaluate(() => localStorage.removeItem("__skapiLag"));
+
+// Too large even compressed: refused with a plain reason, kept locally.
+const { randomBytes } = await import("crypto");
+const noise = Array.from({ length: 10 }, (_, i) => ({ role: i % 2 ? "assistant" : "user", content: randomBytes(210000).toString("base64") }));
+await putDevice(dev({ noise: { messages: noise, updated: 7000 } }));
+await signIn(BIG, "long-stories");
+await page.waitForFunction(() => /^Synced at/.test(document.getElementById("cloud-status").textContent), null, { timeout: 20000 });
+check("large: a chat too big even compressed is refused with a reason", /“noise” is too large to sync: \d\.\d MB even compressed, and the limit is 2\.0 MB/.test(await cloudStatus()) && !(await remoteOf(BIG)).noise, await cloudStatus());
+check("large: and it stays on the device", (await page.evaluate(() => JSON.parse(localStorage.getItem("orc_chat_noise")).length)) === 10);
+await page.click("#save-settings");
+await openChatList();
+check("large: it is marked as not in the account", (await marks()).noise === "↑", JSON.stringify(await marks()));
+await closeChatList();
+await putDevice(dev({}));
 await page.evaluate(() => localStorage.removeItem("__skapiFake"));
 
 check("no page errors", errors.length === 0, JSON.stringify(errors));
