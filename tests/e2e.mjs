@@ -6,6 +6,83 @@ import { chromium } from "playwright";
 const BASE = (process.env.BASE_URL || "http://localhost:8765").replace(/\/$/, "");
 
 const fakeFetch = () => {
+  // Chats live in IndexedDB (database "orc_chats", store "chats"). These
+  // helpers let checks read, plant and wipe them. window.__chats follows
+  // every write the app makes and is filled from the database's own
+  // contents when the app reads it at start, so after a reload it shows
+  // what was really stored. __chatDump reads the database directly.
+  window.__chats = {};
+  // "__lsFailKey": localStorage refuses writes to that one key, as when it is full.
+  if (localStorage.getItem("__lsFailKey")) {
+    const realSetItem = Storage.prototype.setItem;
+    Storage.prototype.setItem = function (k, v) {
+      if (this === localStorage && k === localStorage.getItem("__lsFailKey")) throw new DOMException("Quota exceeded", "QuotaExceededError");
+      return realSetItem.call(this, k, v);
+    };
+  }
+  // "__idbDown": the app can't open its chat database (the helpers below still can).
+  const realOpen = IDBFactory.prototype.open;
+  if (localStorage.getItem("__idbDown")) {
+    IDBFactory.prototype.open = function (name, ...rest) {
+      if (name === "orc_chats" && !window.__helperOpen) throw new DOMException("The database could not be opened", "UnknownError");
+      return realOpen.call(this, name, ...rest);
+    };
+  }
+  {
+    const P = IDBObjectStore.prototype;
+    const realPut = P.put, realDelete = P.delete, realClear = P.clear, realGetAll = P.getAll;
+    P.put = function (v, ...rest) {
+      if (this.name === "chats" && v && typeof v.id === "string") {
+        // "__quotaKey" (one chat) or __chatWritesFail (all): the write is refused, as when storage is full.
+        if (window.__chatWritesFail || localStorage.getItem("__quotaKey") === "orc_chat_" + v.id) throw new DOMException("Quota exceeded", "QuotaExceededError");
+        window.__chats[v.id] = v.json;
+        // "__raceChat" = { id, json }: while that chat is being written to the
+        // database, a tab on the previous version rewrites its old copy.
+        const race = JSON.parse(localStorage.getItem("__raceChat") || "null");
+        if (race && race.id === v.id) { localStorage.removeItem("__raceChat"); localStorage.setItem("orc_chat" + "_" + race.id, race.json); }
+      }
+      const req = realPut.call(this, v, ...rest);
+      // "__chatAbort": the write is accepted and then refused at commit,
+      // which is how the database reports running out of room.
+      if (this.name === "chats" && localStorage.getItem("__chatAbort")) this.transaction.abort();
+      return req;
+    };
+    P.delete = function (k) { if (this.name === "chats") delete window.__chats[k]; return realDelete.call(this, k); };
+    P.clear = function () { if (this.name === "chats") window.__chats = {}; return realClear.call(this); };
+    P.getAll = function (...a) {
+      const req = realGetAll.apply(this, a);
+      if (this.name === "chats") req.addEventListener("success", () => { for (const r of req.result) window.__chats[r.id] = r.json; });
+      return req;
+    };
+    const openDb = () => new Promise((res, rej) => {
+      window.__helperOpen = true;
+      let r;
+      try { r = indexedDB.open("orc_chats", 1); } finally { window.__helperOpen = false; }
+      r.onupgradeneeded = () => r.result.createObjectStore("chats", { keyPath: "id" });
+      r.onsuccess = () => res(r.result);
+      r.onerror = () => rej(r.error);
+    });
+    const withStore = async (mode, fn) => {
+      const db = await openDb();
+      try {
+        return await new Promise((res, rej) => {
+          const tx = db.transaction("chats", mode);
+          const out = fn(tx.objectStore("chats"));
+          tx.oncomplete = () => res(out && "result" in out ? out.result : undefined);
+          tx.onabort = () => rej(tx.error);
+        });
+      } finally { db.close(); }
+    };
+    // What a chat holds: the database's copy, or one still in the old place.
+    window.__chatGet = (id) => (id in window.__chats ? window.__chats[id] : localStorage.getItem("orc_chat" + "_" + id));
+    window.__chatSet = (id, json) => withStore("readwrite", (st) => realPut.call(st, { id, json }));
+    window.__chatDump = async () => Object.fromEntries((await withStore("readonly", (st) => realGetAll.call(st))).map(r => [r.id, r.json]));
+    window.__chatWipe = async () => {
+      await withStore("readwrite", (st) => realClear.call(st));
+      window.__chats = {};
+      Object.keys(localStorage).filter(k => k.startsWith("orc_chat_")).forEach(k => localStorage.removeItem(k));
+    };
+  }
   window.__requests = [];
   window.__scenarios = [];
   const realFetch = window.fetch.bind(window);
@@ -196,14 +273,6 @@ const fakeFetch = () => {
 // and response shapes copy what the real service returned when probed.
 const fakeSkapi = () => {
   if (!localStorage.getItem("__skapiFake")) return;
-  // "__quotaKey": that localStorage key refuses writes, as when storage is full.
-  if (localStorage.getItem("__quotaKey")) {
-    const realSet = Storage.prototype.setItem;
-    Storage.prototype.setItem = function (k, v) {
-      if (k === localStorage.getItem("__quotaKey")) throw new DOMException("Quota exceeded", "QuotaExceededError");
-      return realSet.call(this, k, v);
-    };
-  }
   const load = () => JSON.parse(localStorage.getItem("__skapi_db") || '{"users":{},"session":null,"records":[],"clock":0}');
   const save = (db) => localStorage.setItem("__skapi_db", JSON.stringify(db));
   const err = (code, message) => Object.assign(new Error(message), { code });
@@ -318,7 +387,7 @@ const errors = [];
 page.on("pageerror", e => errors.push("pageerror: " + e.message));
 page.on("console", m => { if (m.type() === "error") errors.push("console: " + m.text()); });
 page.on("dialog", d => d.accept());
-const curChat = () => page.evaluate(() => JSON.parse(localStorage.getItem("orc_chat_" + localStorage.getItem("orc_current_chat"))));
+const curChat = () => page.evaluate(() => JSON.parse(window.__chatGet(localStorage.getItem("orc_current_chat"))));
 const chatIndex = () => page.evaluate(() => JSON.parse(localStorage.getItem("orc_chats") || "[]"));
 
 const results = {};
@@ -492,7 +561,7 @@ const stored = (await curChat()).map(m => m.role);
 check("stored history only user/assistant", stored.every(r => r === "user" || r === "assistant"), JSON.stringify(stored));
 
 // 6. Dangling user message on reload gets a retry
-await page.evaluate(() => { const k = "orc_chat_" + localStorage.getItem("orc_current_chat"); const h = JSON.parse(localStorage.getItem(k)); h.push({ role: "user", content: "lost" }); localStorage.setItem(k, JSON.stringify(h)); });
+await page.evaluate(async () => { const id = localStorage.getItem("orc_current_chat"); const h = JSON.parse(window.__chatGet(id)); h.push({ role: "user", content: "lost" }); await window.__chatSet(id, JSON.stringify(h)); });
 await page.reload({ waitUntil: "load" });
 await page.waitForTimeout(300);
 check("dangling user shows retry", (await page.$$(".msg.error .retry-btn")).length === 1);
@@ -528,7 +597,7 @@ await page.click("#open-chats");
 await page.click(`.chat-row:nth-child(1) .chat-open`);
 await page.waitForTimeout(1200);
 check("switched chat shows no stray streaming bubble", (await page.$$(".msg.assistant")).length === 1 && (await page.$$(".msg.assistant.streaming")).length === 0 && (await page.textContent("#chat-title")) === "second chat msg");
-const oldChatMsgs = await page.evaluate(id => JSON.parse(localStorage.getItem("orc_chat_" + id)), firstChatId);
+const oldChatMsgs = await page.evaluate(id => JSON.parse(window.__chatGet(id)), firstChatId);
 check("reply filed to originating chat (stopped or complete)", oldChatMsgs[oldChatMsgs.length - 1].role === "assistant" && oldChatMsgs[oldChatMsgs.length - 1].content.startsWith("slow"), JSON.stringify(oldChatMsgs.slice(-1)));
 check("streaming ui reset after switch", !(await page.$eval("#send-btn", b => b.classList.contains("stop"))));
 
@@ -536,15 +605,15 @@ check("streaming ui reset after switch", !(await page.$eval("#send-btn", b => b.
 await page.click("#open-settings");
 await page.click("#clear-chat");
 check("delete current chat -> new chat", (await page.textContent("#chat-title")) === "New chat" && (await chatIndex()).length === 1 && (await chatIndex())[0].id === firstChatId);
-check("deleted chat storage removed", (await page.evaluate(id => localStorage.getItem("orc_chat_" + id), secondChatId)) === null);
+check("deleted chat storage removed", (await page.evaluate(id => window.__chatGet(id), secondChatId)) === null);
 await page.reload({ waitUntil: "load" });
 await page.waitForTimeout(300);
 check("reload with no current chat stays on new chat", (await page.textContent("#chat-title")) === "New chat");
 
 // Legacy migration
-await page.evaluate(() => {
+await page.evaluate(async () => {
   localStorage.removeItem("orc_chats"); localStorage.removeItem("orc_current_chat");
-  Object.keys(localStorage).filter(k => k.startsWith("orc_chat_")).forEach(k => localStorage.removeItem(k));
+  await window.__chatWipe();
   localStorage.setItem("orc_history", JSON.stringify([{ role: "user", content: "old thread question" }, { role: "assistant", content: "old answer", model: "google/gemma-3-4b-it" }, { role: "error", content: "junk" }]));
 });
 await page.reload({ waitUntil: "load" });
@@ -553,6 +622,23 @@ const migrated = await chatIndex();
 check("legacy thread migrated", migrated.length === 1 && migrated[0].title === "old thread question" && migrated[0].model === "google/gemma-3-4b-it" && migrated[0].count === 2, JSON.stringify(migrated));
 check("legacy key removed, messages shown", (await page.evaluate(() => localStorage.getItem("orc_history"))) === null && (await page.$$(".msg.assistant")).length === 1 && (await page.textContent("#chat-title")) === "old thread question");
 
+// The same move when the database refuses the write at commit: the old
+// thread is the only durable copy, so it must still be there, and the
+// retry on the next launch must not list the chat twice.
+await page.evaluate(async () => {
+  localStorage.removeItem("orc_chats"); localStorage.removeItem("orc_current_chat");
+  await window.__chatWipe();
+  localStorage.setItem("orc_history", JSON.stringify([{ role: "user", content: "old thread question" }, { role: "assistant", content: "old answer", model: "google/gemma-3-4b-it" }]));
+  localStorage.setItem("__chatAbort", "1");
+});
+await page.reload({ waitUntil: "load" });
+await page.waitForSelector(".msg.error");
+check("legacy thread is kept while its move is unconfirmed", !!(await page.evaluate(() => localStorage.getItem("orc_history"))) && Object.keys(await page.evaluate(() => window.__chatDump())).length === 0 && (await page.textContent(".msg.error")).includes("couldn't save a chat"), await page.textContent(".msg.error"));
+check("a refused write is recorded for the next launch", (await page.evaluate(() => localStorage.getItem("orc_unsaved"))) === JSON.stringify(["legacy-history"]));
+await page.evaluate(() => localStorage.removeItem("__chatAbort"));
+await page.reload({ waitUntil: "load" });
+await page.waitForFunction(() => localStorage.getItem("orc_history") === null, null, { timeout: 10000 });
+check("legacy thread moves on the next launch, listed once", (await chatIndex()).length === 1 && Object.keys(await page.evaluate(() => window.__chatDump())).join() === "legacy-history" && (await page.$$(".msg.assistant")).length === 1 && (await page.evaluate(() => localStorage.getItem("orc_unsaved"))) === null, JSON.stringify(await chatIndex()));
 
 // ---------- Profiles ----------
 // State here: current chat "old thread question" (migrated), model anthropic/claude-sonnet-4, no system prompt.
@@ -680,7 +766,7 @@ await page.waitForFunction(() => /^Imported/.test(document.querySelector("#trans
 check("re-import skips duplicates", (await page.textContent("#transfer-status")) === `Imported 0 chats, ${chatsBefore.length} already here, ${profilesBefore.length} profiles already here.` && (await chatIndex()).length === chatsBefore.length, await page.textContent("#transfer-status"));
 
 // Wipe chats, import: all restored, current chat state fine.
-await page.evaluate(() => { const idx = JSON.parse(localStorage.getItem("orc_chats")); idx.forEach(c => localStorage.removeItem("orc_chat_" + c.id)); localStorage.removeItem("orc_chats"); localStorage.removeItem("orc_current_chat"); });
+await page.evaluate(async () => { await window.__chatWipe(); localStorage.removeItem("orc_chats"); localStorage.removeItem("orc_current_chat"); });
 await page.reload({ waitUntil: "load" });
 await page.waitForTimeout(300);
 await page.click("#open-chats");
@@ -694,7 +780,7 @@ check("restored chat opens", await (async () => { await page.click(".chat-row:nt
 // Same id, different content: added as a copy, original untouched. Junk entries dropped, missing title rebuilt.
 const tampered = JSON.parse(exportText);
 const target = tampered.chats[0];
-const originalMsgs = await page.evaluate(id => JSON.parse(localStorage.getItem("orc_chat_" + id)), target.id);
+const originalMsgs = await page.evaluate(id => JSON.parse(window.__chatGet(id)), target.id);
 target.messages = [{ role: "user", content: "tampered question" }, { role: "error", content: "junk" }, { role: "assistant", content: "tampered answer", model: "x/y" }];
 delete target.title;
 tampered.profiles = [{ id: "brandnew", name: profilesBefore[0].name, model: "google/gemma-3-4b-it", systemPrompt: "dup name", filters: {}, includes: { model: true, prompt: true, filters: true }, isDefault: true }];
@@ -703,7 +789,7 @@ await page.setInputFiles("#import-file", { name: "t.json", mimeType: "applicatio
 await page.waitForFunction(() => /^Imported 1 chat/.test(document.querySelector("#transfer-status").textContent));
 const afterTamper = await chatIndex();
 const copy = afterTamper.find(c => c.title === "tampered question (imported copy)");
-check("changed chat imported as copy, original kept", !!copy && copy.count === 2 && JSON.stringify(await page.evaluate(id => JSON.parse(localStorage.getItem("orc_chat_" + id)), target.id)) === JSON.stringify(originalMsgs), JSON.stringify(afterTamper.map(c => c.title)));
+check("changed chat imported as copy, original kept", !!copy && copy.count === 2 && JSON.stringify(await page.evaluate(id => JSON.parse(window.__chatGet(id)), target.id)) === JSON.stringify(originalMsgs), JSON.stringify(afterTamper.map(c => c.title)));
 const profsAfter = await page.evaluate(() => JSON.parse(localStorage.getItem("orc_profiles")));
 check("imported profile renamed, never default", profsAfter.some(p => p.name === profilesBefore[0].name + " (imported)" && p.isDefault === false), JSON.stringify(profsAfter.map(p => [p.name, p.isDefault])));
 
@@ -1189,7 +1275,7 @@ await page.click("#share-chat");
 await page.waitForFunction(() => /copied to the clipboard/.test(document.getElementById("chat-export-status").textContent));
 check("share: with no share sheet the chat is copied", (await page.evaluate(() => navigator.clipboard.readText())) === expectedShare);
 // A very long chat goes as a .txt file, which Android's share sheet accepts.
-await page.evaluate(() => {
+await page.evaluate(async () => {
   window.__shareError = null;
   Object.defineProperty(navigator, "share", { configurable: true, value: async (d) => {
     const files = [];
@@ -1198,7 +1284,7 @@ await page.evaluate(() => {
     if (window.__shareError) throw window.__shareError;
   } });
   const big = [{ role: "user", content: "long one" }, { role: "assistant", content: "x".repeat(120000) }];
-  localStorage.setItem("orc_chat_bulk5", JSON.stringify(big));
+  await window.__chatSet("bulk5", JSON.stringify(big));
 });
 await page.reload({ waitUntil: "load" });
 await page.evaluate(() => {
@@ -1217,7 +1303,7 @@ await page.click("#share-chat");
 await page.waitForFunction(() => window.__sharedData.length === 1);
 const sharedBig = await page.evaluate(() => window.__sharedData[0]);
 check("share: a very long chat goes as a plain-text file", sharedBig.text === undefined && sharedBig.files.length === 1 && /^openrouter-chat-bulk-chat-5-\d{4}-\d{2}-\d{2}\.txt$/.test(sharedBig.files[0][0]) && sharedBig.files[0][1] === "text/plain" && sharedBig.files[0][2] > 120000, JSON.stringify(sharedBig));
-await page.evaluate((v) => localStorage.setItem("orc_chat_bulk5", v), JSON.stringify([{ role: "user", content: "question 5" }, { role: "assistant", content: "answer 5" }]));
+await page.evaluate((v) => window.__chatSet("bulk5", v), JSON.stringify([{ role: "user", content: "question 5" }, { role: "assistant", content: "answer 5" }]));
 await page.reload({ waitUntil: "load" });
 // Sharing everything: the export goes as text/plain too, and a refusal downloads it.
 await page.evaluate(() => {
@@ -1267,19 +1353,14 @@ await page.click("#send-btn");
 await page.waitForFunction(() => document.querySelectorAll(".msg.assistant .meta").length === 1);
 const fullChatId = await page.evaluate(() => localStorage.getItem("orc_current_chat"));
 await page.evaluate(() => {
-  const real = Storage.prototype.setItem;
-  window.__realSetItem = real;
-  Storage.prototype.setItem = function (k, v) {
-    if (String(k).startsWith("orc_chat")) throw new DOMException("Quota exceeded", "QuotaExceededError");
-    return real.call(this, k, v);
-  };
+  window.__chatWritesFail = true;
 });
 await page.evaluate(() => window.__scenarios.push({ kind: "ok", text: "unsaved reply" }));
 await page.fill("#composer", "unsaved question");
 await page.click("#send-btn");
 await page.waitForFunction(() => document.querySelectorAll(".msg.assistant .meta").length === 2);
 check("export: storage-full warning shown", (await page.textContent("#messages")).includes("storage is full"));
-check("export: setup has messages only in memory", (await page.evaluate((id) => JSON.parse(localStorage.getItem("orc_chat_" + id)).length, fullChatId)) === 2);
+check("export: setup has messages only in memory", (await page.evaluate((id) => JSON.parse(window.__chatGet(id)).length, fullChatId)) === 2);
 await page.click("#open-settings");
 const [dlFull] = await Promise.all([page.waitForEvent("download"), page.click("#export-chat")]);
 const fullChatFile = JSON.parse((await import("fs")).readFileSync(await dlFull.path(), "utf8"));
@@ -1291,16 +1372,24 @@ const [dlAllFull] = await Promise.all([page.waitForEvent("download"), page.click
 const allFullFile = JSON.parse((await import("fs")).readFileSync(await dlAllFull.path(), "utf8"));
 const openInAll = allFullFile.chats.find(c => c.id === fullChatId);
 check("export: full export includes the open chat's unsaved messages", openInAll && openInAll.messages.length === 4, JSON.stringify(openInAll && openInAll.messages.length));
-await page.evaluate(() => { Storage.prototype.setItem = window.__realSetItem; });
+await page.evaluate(() => { window.__chatWritesFail = false; });
 await page.click("#chats-overlay", { position: { x: 380, y: 400 } });
 
 
 // ---------- Dropped connections (backgrounded tab, flaky mobile network) ----------
 const baseDevice = { orc_api_key: "sk-or-v1-test", orc_model: "anthropic/claude-sonnet-4" };
-const takeDevice = () => page.evaluate(() => Object.fromEntries(Object.keys(localStorage).filter(k => k.startsWith("orc_")).map(k => [k, localStorage.getItem(k)])));
+// A device is its orc_ keys, with each chat as "orc_chat_<id>": chats are
+// read from the database itself, and planted in the old place, so every
+// device swap also runs the move into the database.
+const takeDevice = () => page.evaluate(async () => {
+  const d = Object.fromEntries(Object.keys(localStorage).filter(k => k.startsWith("orc_")).map(k => [k, localStorage.getItem(k)]));
+  for (const [id, json] of Object.entries(await window.__chatDump())) d["orc_chat_" + id] = json;
+  return d;
+});
 const putDevice = async (device) => {
-  await page.evaluate((d) => {
+  await page.evaluate(async (d) => {
     Object.keys(localStorage).filter(k => k.startsWith("orc_")).forEach(k => localStorage.removeItem(k));
+    await window.__chatWipe();
     for (const [k, v] of Object.entries(d)) localStorage.setItem(k, v);
   }, device);
   await page.reload({ waitUntil: "load" });
@@ -1476,7 +1565,7 @@ const dev = (chatMap, extra = {}) => {
 const qa = (...texts) => texts.map((t, i) => ({ role: i % 2 ? "assistant" : "user", content: t }));
 const remoteDb = () => page.evaluate(() => JSON.parse(localStorage.getItem("__skapi_db") || "null"));
 const remoteChats = async (userId) => Object.fromEntries((await remoteDb()).records.filter(r => r.user_id === userId).map(r => [r.data.id, r.data]));
-const localChats = () => page.evaluate(() => Object.fromEntries(JSON.parse(localStorage.getItem("orc_chats") || "[]").map(c => [c.id, { title: c.title, messages: JSON.parse(localStorage.getItem("orc_chat_" + c.id) || "[]") }])));
+const localChats = () => page.evaluate(() => Object.fromEntries(JSON.parse(localStorage.getItem("orc_chats") || "[]").map(c => [c.id, { title: c.title, messages: JSON.parse(window.__chatGet(c.id) || "[]") }])));
 const texts = (c) => c ? c.messages.map(m => m.content).join("|") : "(missing)";
 const cloudStatus = () => page.textContent("#cloud-status");
 const synced = () => page.waitForFunction(() => /^Synced at/.test(document.getElementById("cloud-status").textContent));
@@ -1555,7 +1644,7 @@ await page.waitForFunction(() => JSON.parse(localStorage.getItem("__skapi_db")).
 await page.waitForFunction(() => /^Synced at/.test(document.getElementById("cloud-status").textContent));
 const deviceB1 = await takeDevice();
 await putDevice(deviceA1);
-await page.waitForFunction(() => JSON.parse(localStorage.getItem("orc_chat_a1") || "[]").length === 4 && !!localStorage.getItem("orc_chat_b1"));
+await page.waitForFunction(() => JSON.parse(window.__chatGet("a1") || "[]").length === 4 && !!window.__chatGet("b1"));
 check("sync: a chat continued elsewhere is brought up to date on reload", texts((await localChats()).a1) === "a1 q|a1 a|a1 from B q|a1 from B a" && texts((await localChats()).b1) === "b1 q|b1 a");
 await synced();
 
@@ -1641,7 +1730,7 @@ await synced();
 check("sync: a deleted chat stays deleted on the device that deleted it", !(await localChats()).b1 && (await remoteChats("user-1")).b1.deleted === true);
 const deviceA3 = await takeDevice();
 await putDevice(deviceB2);
-await page.waitForFunction(() => /^Synced at/.test(document.getElementById("cloud-status").textContent) && !localStorage.getItem("orc_chat_b1"), null, { timeout: 15000 });
+await page.waitForFunction(() => /^Synced at/.test(document.getElementById("cloud-status").textContent) && !window.__chatGet("b1"), null, { timeout: 15000 });
 check("sync: a delete reaches the other device", !(await localChats()).b1 && (await cloudStatus()).includes("deleted on another device"), await cloudStatus());
 check("sync: the other device also receives the conflict copy", Object.values(await localChats()).some(c => c.title === "a2 (this device's copy)"));
 
@@ -1941,7 +2030,7 @@ await send("r1 A again q");
 await page.waitForFunction(() => JSON.parse(localStorage.getItem("__skapi_db")).records.find(r => r.data.id === "r1").data.messages.length === 6, null, { timeout: 15000 });
 await synced();
 await putDevice(raceB2);
-await page.waitForFunction(() => JSON.parse(localStorage.getItem("orc_chat_r1")).length === 6, null, { timeout: 15000 });
+await page.waitForFunction(() => JSON.parse(window.__chatGet("r1")).length === 6, null, { timeout: 15000 });
 await synced();
 check("race: a normal update from another device still just updates", Object.keys(await localChats()).length === 2 && texts((await localChats()).r1).endsWith("r1 A again q|r1 A again a"), JSON.stringify(Object.keys(await localChats())));
 
@@ -1964,7 +2053,7 @@ await page.waitForTimeout(3600);
 check("full: a longer account copy that can't be stored here is not overwritten", texts((await remoteChats("user-3")).f1) === "f1 q|f1 a|f1 more q|f1 more a" && texts((await localChats()).f1) === "f1 q|f1 a", texts((await remoteChats("user-3")).f1));
 await page.evaluate(() => localStorage.removeItem("__quotaKey"));
 await page.reload({ waitUntil: "load" });
-await page.waitForFunction(() => JSON.parse(localStorage.getItem("orc_chat_f1")).length === 4, null, { timeout: 15000 });
+await page.waitForFunction(() => JSON.parse(window.__chatGet("f1")).length === 4, null, { timeout: 15000 });
 check("full: once there is room it arrives", texts((await localChats()).f1) === "f1 q|f1 a|f1 more q|f1 more a");
 await synced();
 
@@ -2152,7 +2241,7 @@ await editRemote(FRIEND, "s1", "db.records[i].data.messages.push({ role: 'user',
 await openChatList();
 await page.click('.chat-row:has(.chat-title:text-is("s1")) .chat-delete');
 check("delete: setup, the chat is gone from this device", !(await localChats()).s1);
-await page.waitForFunction(() => !!localStorage.getItem("orc_chat_s1"), null, { timeout: 15000 });
+await page.waitForFunction(() => !!window.__chatGet("s1"), null, { timeout: 15000 });
 await page.waitForFunction(() => /^Synced at/.test(document.getElementById("cloud-status").textContent));
 check("delete: a chat changed elsewhere since comes back with the new text", texts((await localChats()).s1) === "s1 q|s1 a|s1 q2|s1 a2|chapter two q|chapter two a", texts((await localChats()).s1));
 check("delete: and the account's copy is not replaced by a delete", texts((await remoteOf(FRIEND)).s1) === "s1 q|s1 a|s1 q2|s1 a2|chapter two q|chapter two a" && !(await remoteOf(FRIEND)).s1.deleted, JSON.stringify((await remoteOf(FRIEND)).s1));
@@ -2188,7 +2277,7 @@ await editRemote(FRIEND, laggedId, "db.records[i].data.messages.push({ role: 'us
 await page.evaluate((id) => localStorage.setItem("__skapiLag", id), laggedId);
 await openChatList();
 await page.click('.chat-row:has(.chat-title:text-is("offline story")) .chat-delete');
-await page.waitForFunction((id) => !!localStorage.getItem("orc_chat_" + id), laggedId, { timeout: 15000 });
+await page.waitForFunction((id) => !!window.__chatGet(id), laggedId, { timeout: 15000 });
 await page.waitForFunction(() => /^Synced at/.test(document.getElementById("cloud-status").textContent));
 check("delete: a newer copy the listing didn't show is still found and kept", texts((await localChats())[laggedId]) === "offline story|offline a|lagged q|lagged a" && !(await remoteOf(FRIEND))[laggedId].deleted && texts((await remoteOf(FRIEND))[laggedId]) === "offline story|offline a|lagged q|lagged a", texts((await localChats())[laggedId]));
 check("delete: and that is reported", (await cloudStatus()).includes("1 chat deleted here had newer changes from another device, so it was kept"), await cloudStatus());
@@ -2216,7 +2305,7 @@ check("send: a rejected merge leaves no upload marker behind", (await page.evalu
 await closeChatList();
 await page.evaluate(() => localStorage.removeItem("__quotaKey"));
 await page.reload({ waitUntil: "load" });
-await page.waitForFunction((id) => JSON.parse(localStorage.getItem("orc_chat_" + id) || "[]").length === 6, laggedId, { timeout: 15000 });
+await page.waitForFunction((id) => JSON.parse(window.__chatGet(id) || "[]").length === 6, laggedId, { timeout: 15000 });
 check("send: once there is room the longer copy arrives intact", texts((await localChats())[laggedId]).endsWith("lagged a|too big q|too big a") && texts((await remoteOf(FRIEND))[laggedId]).endsWith("lagged a|too big q|too big a"));
 
 // Once a day everything is re-read, so a record that an incremental pull
@@ -2237,7 +2326,7 @@ check("recheck: an ordinary sync does not re-read old records", !(await localCha
 const staleState = JSON.parse(missedDevice.orc_cloud_state);
 staleState.fullAt = Date.now() - 25 * 60 * 60 * 1000;
 await putDevice({ ...missedDevice, orc_cloud_state: JSON.stringify(staleState) });
-await page.waitForFunction(() => !!localStorage.getItem("orc_chat_missed"), null, { timeout: 15000 });
+await page.waitForFunction(() => !!window.__chatGet("missed"), null, { timeout: 15000 });
 await page.waitForFunction(() => /^Synced at/.test(document.getElementById("cloud-status").textContent));
 check("recheck: after a day everything is re-read and the missed chat arrives", texts((await localChats()).missed) === "missed q|missed a" && (await cloudStatus()).includes("Everything was checked"), await cloudStatus());
 check("recheck: the full check is remembered", await page.evaluate(() => Date.now() - JSON.parse(localStorage.getItem("orc_cloud_state")).fullAt < 60000));
@@ -2278,9 +2367,9 @@ await closeChatList();
 // Another device receives it whole.
 await putDevice(dev({}));
 await signIn(BIG, "long-stories");
-await page.waitForFunction(() => !!localStorage.getItem("orc_chat_epic"), null, { timeout: 15000 });
+await page.waitForFunction(() => !!window.__chatGet("epic"), null, { timeout: 15000 });
 await synced();
-check("large: another device receives the story intact", (await page.evaluate(() => localStorage.getItem("orc_chat_epic"))) === JSON.stringify(epicMessages) && texts((await localChats()).note) === "short q|short a");
+check("large: another device receives the story intact", (await page.evaluate(() => window.__chatGet("epic"))) === JSON.stringify(epicMessages) && texts((await localChats()).note) === "short q|short a");
 
 // It grows there and goes back up, still compressed.
 await page.click("#save-settings");
@@ -2340,7 +2429,7 @@ await putDevice(dev({ noise: { messages: noise, updated: 7000 } }));
 await signIn(BIG, "long-stories");
 await page.waitForFunction(() => /^Synced at/.test(document.getElementById("cloud-status").textContent), null, { timeout: 20000 });
 check("large: a chat too big even compressed is refused with a reason", /“noise” is too large to sync: \d\.\d MB even compressed, and the limit is 2\.0 MB/.test(await cloudStatus()) && !(await remoteOf(BIG)).noise, await cloudStatus());
-check("large: and it stays on the device", (await page.evaluate(() => JSON.parse(localStorage.getItem("orc_chat_noise")).length)) === 10);
+check("large: and it stays on the device", (await page.evaluate(() => JSON.parse(window.__chatGet("noise")).length)) === 10);
 await page.click("#save-settings");
 await openChatList();
 check("large: it is marked as not in the account", (await marks()).noise === "↑", JSON.stringify(await marks()));
@@ -2423,11 +2512,7 @@ check("edit: pictures of the replaced reply are cleared out", imagesBeforeEdit =
 // With storage full the edited chat can't be saved, so the stored copy
 // still shows the old reply: its picture must not be deleted.
 await page.evaluate(() => {
-  window.__realSetItem = Storage.prototype.setItem;
-  Storage.prototype.setItem = function (k, v) {
-    if (String(k).startsWith("orc_chat")) throw new DOMException("Quota exceeded", "QuotaExceededError");
-    return window.__realSetItem.call(this, k, v);
-  };
+  window.__chatWritesFail = true;
 });
 await clickAct("user", "Edit");
 await page.fill("#composer", "draw a bear");
@@ -2435,7 +2520,7 @@ await page.click("#send-btn");
 await idle();
 await page.waitForTimeout(300);
 check("edit: with storage full the stored reply keeps its picture", (await idbCount()) === 2 && (await curChat())[2].content === "draw a wolf", String(await idbCount()));
-await page.evaluate(() => { Storage.prototype.setItem = window.__realSetItem; });
+await page.evaluate(() => { window.__chatWritesFail = false; });
 await page.reload({ waitUntil: "load" });
 await page.waitForTimeout(300);
 
@@ -2486,7 +2571,7 @@ await page.click("#save-settings");
 await clickAct("user", "Edit");
 await editRemote(EDITOR, "t1", "db.records[i].data.messages.push({ role: 'user', content: 't1 q3' }, { role: 'assistant', content: 't1 a3' }); db.records[i].data.updated = now; db.records[i].updated = now;");
 await page.evaluate(() => document.getElementById("cloud-sync-now").click());
-await page.waitForFunction(() => JSON.parse(localStorage.getItem("orc_chat_t1")).length === 6, null, { timeout: 15000 });
+await page.waitForFunction(() => JSON.parse(window.__chatGet("t1")).length === 6, null, { timeout: 15000 });
 const requestsBeforeStale = await page.evaluate(() => window.__requests.length);
 await page.fill("#composer", "edited too late");
 await page.click("#send-btn");
@@ -2500,8 +2585,170 @@ await putDevice(dev({ t1: { messages: qa("t1 q", "t1 a", "t1 q2", "t1 a2"), upda
 await signIn(EDITOR, "edit-pass");
 await synced();
 check("sync: another device with the old copy keeps both rather than guessing", Object.values(await localChats()).map(texts).sort().join(" / ") === "t1 q|t1 a|t1 q2|t1 a2 / t1 q|t1 a|t1 q2|t1 a2 third|t1 q3|t1 a3", JSON.stringify(Object.values(await localChats()).map(texts)));
+// A chat's write was refused and the app closed before it went through:
+// the next launch re-reads everything from the account.
+const afterRefusal = await takeDevice();
+await putDevice({ ...afterRefusal, orc_unsaved: JSON.stringify(["t1"]) });
+await page.waitForFunction(() => /^Synced at/.test(document.getElementById("cloud-status").textContent), null, { timeout: 15000 });
+check("unsaved: a refused write makes the next launch re-read the account", (await cloudStatus()).includes("Everything was checked") && (await page.evaluate(() => localStorage.getItem("orc_unsaved"))) === null, await cloudStatus());
 await putDevice(dev({}));
 await page.evaluate(() => localStorage.removeItem("__skapiFake"));
+
+// ---------- Where chats are kept: the move from localStorage to IndexedDB ----------
+const lsChatKeys = () => page.evaluate(() => Object.keys(localStorage).filter(k => k.startsWith("orc_chat_")));
+const plantOld = (id, messages) => page.evaluate(([id, json]) => localStorage.setItem("orc_chat_" + id, json), [id, JSON.stringify(messages)]);
+const storedTexts = async (id) => { const all = await page.evaluate(() => window.__chatDump()); return id in all ? JSON.parse(all[id]).map(m => m.content).join("|") : "(missing)"; };
+
+// An upgrade: chats sit in localStorage, written by the previous version.
+const oldDevice = dev({ m1: { messages: qa("m1 q", "m1 a"), updated: 1000 }, m2: { messages: qa("m2 q", "m2 a", "m2 q2", "m2 a2"), updated: 2000 } }, { orc_current_chat: "m2" });
+await page.evaluate(async (d) => {
+  Object.keys(localStorage).filter(k => k.startsWith("orc_")).forEach(k => localStorage.removeItem(k));
+  await window.__chatWipe();
+  for (const [k, v] of Object.entries(d)) localStorage.setItem(k, v);
+}, oldDevice);
+check("move: setup, chats are in the old place and the database is empty", (await lsChatKeys()).length === 2 && Object.keys(await page.evaluate(() => window.__chatDump())).length === 0);
+await page.reload({ waitUntil: "load" });
+await page.waitForFunction(() => document.querySelectorAll(".msg.assistant").length === 2);
+const movedDump = await page.evaluate(() => window.__chatDump());
+check("move: on first launch every chat is in the database, byte for byte", movedDump.m1 === oldDevice.orc_chat_m1 && movedDump.m2 === oldDevice.orc_chat_m2 && Object.keys(movedDump).length === 2, JSON.stringify(Object.keys(movedDump)));
+check("move: the old copies are removed only after that, and the move is recorded", (await lsChatKeys()).length === 0 && (await page.evaluate(() => localStorage.getItem("orc_store"))) === "idb");
+check("move: the open chat and the chat list are as before", (await page.textContent("#chat-title")) === "m2" && (await page.$$(".msg.user")).length === 2 && (await chatIndex()).length === 2);
+await page.evaluate(() => window.__scenarios.push({ kind: "ok", text: "m2 a3" }));
+await send("m2 q3");
+await idle();
+await page.reload({ waitUntil: "load" });
+await page.waitForFunction(() => document.querySelectorAll(".msg.assistant").length === 3);
+check("move: a new reply is saved to the database and survives a reload", (await storedTexts("m2")) === "m2 q|m2 a|m2 q2|m2 a2|m2 q3|m2 a3" && (await lsChatKeys()).length === 0);
+
+// More than localStorage could ever hold: four chats of about 2 MB each.
+const fatMessages = (tag) => [{ role: "user", content: tag + " q" }, { role: "assistant", content: (tag + " ").repeat(Math.ceil(2 * 1024 * 1024 / (tag.length + 1))) }];
+await page.evaluate(async (chats) => {
+  const index = JSON.parse(localStorage.getItem("orc_chats"));
+  for (const [id, json] of chats) { await window.__chatSet(id, json); index.push({ id, title: id, created: 1, updated: 3000, model: "m/x", count: 2 }); }
+  localStorage.setItem("orc_chats", JSON.stringify(index));
+  localStorage.setItem("orc_current_chat", "fat3");
+}, ["fat0", "fat1", "fat2", "fat3"].map(id => [id, JSON.stringify(fatMessages(id))]));
+await page.reload({ waitUntil: "load" });
+await page.waitForFunction(() => document.querySelectorAll(".msg.assistant").length === 1);
+const fatTotal = await page.evaluate(async () => Object.values(await window.__chatDump()).reduce((n, j) => n + j.length, 0));
+check("capacity: over 8 MB of chats is held, far past the old 5 MB limit", fatTotal > 8 * 1024 * 1024 && (await chatIndex()).length === 6, String(fatTotal));
+await page.evaluate(() => window.__scenarios.push({ kind: "ok", text: "still room" }));
+await send("is there room?");
+await idle();
+check("capacity: a reply in a 2 MB chat is saved with no storage warning", (await storedTexts("fat3")).endsWith("is there room?|still room") && !(await page.textContent("#messages")).includes("storage"));
+await page.click("#open-chats");
+await page.click('.chat-row:has(.chat-title:text-is("fat1")) .chat-open');
+check("capacity: every large chat opens", (await page.textContent("#messages")).includes("fat1 fat1 fat1"));
+await page.click("#open-chats");
+await page.click('.chat-row:has(.chat-title:text-is("fat0")) .chat-delete');
+check("capacity: deleting a chat removes it from the database", (await storedTexts("fat0")) === "(missing)" && (await chatIndex()).length === 5);
+await page.click("#chats-overlay", { position: { x: 380, y: 400 } });
+
+// A copy turns up in the old place after the move (a tab still on the
+// previous version wrote it). It is merged, never simply dropped.
+await putDevice(dev({ k1: { messages: qa("k1 q", "k1 a"), updated: 1000 }, k2: { messages: qa("k2 q", "k2 a"), updated: 1000 }, k3: { messages: qa("k3 q", "k3 a", "k3 q2", "k3 a2"), updated: 1000 } }));
+await page.waitForFunction(() => localStorage.getItem("orc_store") === "idb");
+await plantOld("k1", qa("k1 q", "k1 a", "k1 later q", "k1 later a"));   // longer: it wins
+await plantOld("k2", qa("k2 q", "a different k2 answer"));               // diverged: both kept
+await plantOld("k3", qa("k3 q", "k3 a"));                                // shorter: the database's stays
+await page.reload({ waitUntil: "load" });
+await page.waitForFunction(() => !Object.keys(localStorage).some(k => k.startsWith("orc_chat_")), null, { timeout: 10000 });
+const mergedIndex = await chatIndex();
+const recovered = mergedIndex.find(c => c.title === "k2 (recovered copy)");
+check("leftover: a longer copy from the old place replaces the stored one", (await storedTexts("k1")) === "k1 q|k1 a|k1 later q|k1 later a");
+check("leftover: a diverged copy is kept beside the stored one", (await storedTexts("k2")) === "k2 q|k2 a" && !!recovered && (await storedTexts(recovered.id)) === "k2 q|a different k2 answer", JSON.stringify(mergedIndex.map(c => c.title)));
+check("leftover: a shorter copy changes nothing", (await storedTexts("k3")) === "k3 q|k3 a|k3 q2|k3 a2" && mergedIndex.length === 4);
+
+// Same text, different pictures: both replies have empty text, so only a
+// whole-message comparison can tell them apart. The old copy must be kept.
+const picA = [{ role: "user", content: "draw it" }, { role: "assistant", content: "", images: [{ id: "pic-a", type: "image/png" }] }];
+const picB = [{ role: "user", content: "draw it" }, { role: "assistant", content: "", images: [{ id: "pic-b", type: "image/png" }] }];
+await putDevice(dev({ p1: { messages: picA, updated: 1000 } }));
+await page.waitForFunction(() => localStorage.getItem("orc_store") === "idb");
+await plantOld("p1", picB);
+await page.reload({ waitUntil: "load" });
+await page.waitForFunction(() => !Object.keys(localStorage).some(k => k.startsWith("orc_chat_")), null, { timeout: 10000 });
+const picDump = await page.evaluate(() => window.__chatDump());
+const picCopy = (await chatIndex()).find(c => c.title === "p1 (recovered copy)");
+check("leftover: a copy differing only in its pictures is kept, not dropped", picDump.p1.includes("pic-a") && !!picCopy && picDump[picCopy.id].includes("pic-b"), JSON.stringify((await chatIndex()).map(c => c.title)));
+
+// The chat list can't be saved (localStorage is full): a copy kept as a
+// separate chat would then be a chat nothing points to. The old copy
+// stays put, and no such record is left behind.
+await putDevice(dev({ q1: { messages: qa("q1 q", "q1 a"), updated: 1000 } }));
+await page.waitForFunction(() => localStorage.getItem("orc_store") === "idb");
+await plantOld("q1", qa("q1 q", "another q1 answer"));
+await page.evaluate(() => localStorage.setItem("__lsFailKey", "orc_chats"));
+await page.reload({ waitUntil: "load" });
+await page.waitForFunction(() => document.querySelectorAll(".msg.assistant").length === 0 && !document.getElementById("composer").disabled);
+await page.waitForTimeout(300);
+check("leftover: if the chat list can't be saved the old copy stays", (await lsChatKeys()).length === 1 && Object.keys(await page.evaluate(() => window.__chatDump())).join() === "q1" && (await chatIndex()).length === 1, JSON.stringify(Object.keys(await page.evaluate(() => window.__chatDump()))));
+await page.evaluate(() => localStorage.removeItem("__lsFailKey"));
+await page.reload({ waitUntil: "load" });
+await page.waitForFunction(() => !Object.keys(localStorage).some(k => k.startsWith("orc_chat_")), null, { timeout: 10000 });
+check("leftover: and it is recovered on the next launch", (await chatIndex()).some(c => c.title === "q1 (recovered copy)") && Object.keys(await page.evaluate(() => window.__chatDump())).length === 2);
+
+// A tab on the previous version adds to a chat while it is being moved.
+// The old copy no longer reads as it did, so it is not removed, and the
+// newer text is picked up on the next launch.
+await page.evaluate(async (d) => {
+  Object.keys(localStorage).filter(k => k.startsWith("orc_")).forEach(k => localStorage.removeItem(k));
+  await window.__chatWipe();
+  for (const [k, v] of Object.entries(d)) localStorage.setItem(k, v);
+  localStorage.setItem("__raceChat", JSON.stringify({ id: "w1", json: JSON.stringify([{ role: "user", content: "w1 q" }, { role: "assistant", content: "w1 a" }, { role: "user", content: "w1 late q" }, { role: "assistant", content: "w1 late a" }]) }));
+}, dev({ w1: { messages: qa("w1 q", "w1 a"), updated: 1000 } }));
+await page.reload({ waitUntil: "load" });
+await page.waitForFunction(() => localStorage.getItem("orc_store") === "idb");
+await page.waitForTimeout(300);
+check("race: an old copy changed during the move is not removed", (await lsChatKeys()).join() === "orc_chat_w1" && (await storedTexts("w1")) === "w1 q|w1 a");
+await page.reload({ waitUntil: "load" });
+await page.waitForFunction(() => !Object.keys(localStorage).some(k => k.startsWith("orc_chat_")), null, { timeout: 10000 });
+check("race: the text added meanwhile arrives on the next launch", (await storedTexts("w1")) === "w1 q|w1 a|w1 late q|w1 late a");
+
+// The database won't open on a device that has moved. That must read as
+// an error, never as an empty app, and nothing may be written meanwhile.
+await putDevice(dev({ k1: { messages: qa("k1 q", "k1 a", "k1 later q", "k1 later a"), updated: 1000 }, k3: { messages: qa("k3 q", "k3 a"), updated: 900 } }));
+await page.waitForFunction(() => localStorage.getItem("orc_store") === "idb");
+const indexBeforeDown = JSON.stringify(await chatIndex());
+await page.evaluate(() => { localStorage.setItem("__idbDown", "1"); localStorage.setItem("orc_current_chat", "k1"); });
+await page.reload({ waitUntil: "load" });
+await page.waitForSelector(".msg.error", { timeout: 10000 });
+check("blocked: a database that won't open is reported, not shown as no chats", (await page.textContent(".msg.error")).includes("chat storage couldn't be opened") && (await page.textContent(".msg.error")).includes("have not been deleted"));
+await page.click("#open-chats");
+await page.click(".chat-row .chat-delete");
+await page.click(".chat-row .chat-open");
+await page.click("#new-chat-btn");
+check("blocked: chats can't be deleted, opened or started while their store is shut", JSON.stringify(await chatIndex()) === indexBeforeDown && (await page.evaluate(() => localStorage.getItem("orc_current_chat"))) === "k1" && (await page.textContent(".msg.error")).includes("couldn't be opened"));
+await page.click("#chats-overlay", { position: { x: 380, y: 400 } });
+check("blocked: nothing can be sent and nothing is rewritten", (await page.$eval("#composer", e => e.disabled)) && JSON.stringify(await chatIndex()) === indexBeforeDown && (await lsChatKeys()).length === 0 && (await page.evaluate(() => localStorage.getItem("orc_store"))) === "idb");
+await page.evaluate(() => localStorage.removeItem("__idbDown"));
+await page.reload({ waitUntil: "load" });
+await page.waitForFunction(() => document.querySelectorAll(".msg.assistant").length === 2);
+check("blocked: once it opens again every chat is back", (await storedTexts("k1")) === "k1 q|k1 a|k1 later q|k1 later a" && JSON.stringify(await chatIndex()) === indexBeforeDown && !(await page.$eval("#composer", e => e.disabled)));
+
+// No IndexedDB at all on a device that never moved: chats stay in
+// localStorage and everything works as it used to.
+await page.evaluate(async () => {
+  Object.keys(localStorage).filter(k => k.startsWith("orc_")).forEach(k => localStorage.removeItem(k));
+  await window.__chatWipe();
+  localStorage.setItem("orc_api_key", "sk-or-v1-test"); localStorage.setItem("orc_model", "anthropic/claude-sonnet-4");
+  localStorage.setItem("__idbDown", "1");
+});
+await page.reload({ waitUntil: "load" });
+await page.waitForFunction(() => !document.getElementById("composer").disabled);
+await page.evaluate(() => window.__scenarios.push({ kind: "ok", text: "kept the old way" }));
+await send("no database here");
+await idle();
+check("fallback: without IndexedDB a new device keeps chats in localStorage", (await lsChatKeys()).length === 1 && (await page.evaluate(() => localStorage.getItem("orc_store"))) === null && (await page.$$(".msg.error")).length === 0);
+await page.reload({ waitUntil: "load" });
+await page.waitForFunction(() => document.querySelectorAll(".msg.assistant").length === 1);
+check("fallback: and they are still there after a reload", (await page.textContent("#messages")).includes("kept the old way"));
+// When a database becomes available, those chats move into it.
+await page.evaluate(() => localStorage.removeItem("__idbDown"));
+await page.reload({ waitUntil: "load" });
+await page.waitForFunction(() => localStorage.getItem("orc_store") === "idb" && !Object.keys(localStorage).some(k => k.startsWith("orc_chat_")), null, { timeout: 10000 });
+check("fallback: they move into the database when one becomes available", Object.values(await page.evaluate(() => window.__chatDump())).some(j => j.includes("kept the old way")) && (await page.textContent("#messages")).includes("kept the old way"));
+await putDevice(dev({}));
 
 check("no page errors", errors.length === 0, JSON.stringify(errors));
 console.log(JSON.stringify(results, null, 2));

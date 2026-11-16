@@ -40,7 +40,7 @@ Features, roughly in the order they were built:
 
 ## State of `main`
 
-- Service worker cache: `orc-shell-v30` (and `APP_VERSION = 30`). Bump it on every shell change.
+- Service worker cache: `orc-shell-v31` (and `APP_VERSION = 31`). Bump it on every shell change.
 - Tests: `tests/e2e.mjs`, about 275 named checks, all passing in November
   2026 after the account, sync and resilience work (see below).
   Run as described in `tests/README.md` (serve the repo on port 8765; the
@@ -80,8 +80,8 @@ Features, roughly in the order they were built:
   because there's no key. The owner's phone is the real test.
 - Images live only in IndexedDB on the device; exports carry references, not
   image data.
-- localStorage holds about 5 MB. Very long histories can fill it; the app
-  warns, and exports now include the open chat's unsaved messages.
+- Chats are in IndexedDB since version 31 (localStorage's 5 MB was being
+  filled by long stories); see "Where chats are kept" in `index.html`.
 - Ideas parked in README "Ideas for later": streamed image previews, images
   in exports, attaching your own photos, chat rename, Markdown export.
 
