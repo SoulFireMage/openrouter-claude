@@ -1300,7 +1300,7 @@
   var OPENROUTER = "https://openrouter.ai/api/v1";
   // Shown in settings so it is plain which build a device is running. Keep
   // it equal to the number in sw.js's CACHE_NAME (a test checks this).
-  var APP_VERSION = 31;
+  var APP_VERSION = 32;
   var APP_TITLE = "OpenRouter Chat";
 
   /* ---------------- Storage: localStorage with in-memory fallback ---------------- */
@@ -4473,8 +4473,8 @@
      Intelligence, coding and maths indices from Artificial Analysis. Their API
      refuses requests from web pages, so a scheduled GitHub Action
      (.github/workflows/aa-scores.yml) fetches it with a repository secret and
-     publishes data/aa-models.json on this site, refreshed when over 7 days
-     old. The app just reads that file; the service worker caches it offline.
+     publishes data/aa-models.json on this site, refreshed daily from the
+     free endpoint (every page of it). The app just reads that file; the service worker caches it offline.
      Their ids share nothing with OpenRouter's, so models are joined by
      creator plus name tokens. Matching is deliberately strict: a wrong score
      is worse than none. Near misses are accepted only when unambiguous, and
@@ -4497,11 +4497,12 @@
     if (!name && !slug) return null;
     var creator = r.model_creator && typeof r.model_creator === "object" ? r.model_creator : {};
     var ev = r.evaluations && typeof r.evaluations === "object" ? r.evaluations : {};
-    var evals = {};
+    var evals = {}, caps = {};
     Object.keys(ev).forEach(function (k) {
-      if (/^artificial_analysis_/.test(k)) return;
       var v = aaNum(ev[k]);
-      if (v !== null) evals[k] = v;
+      if (v === null) return;
+      if (AA_CAPS[k]) caps[k] = v;
+      else if (!/^artificial_analysis_/.test(k)) evals[k] = v;
     });
     return {
       id: String(r.id || slug || name),
@@ -4514,10 +4515,24 @@
       coding: aaNum(ev.artificial_analysis_coding_index),
       math: aaNum(ev.artificial_analysis_math_index),
       evals: evals,
-      tps: aaNum(r.median_output_tokens_per_second),
-      ttft: aaNum(r.median_time_to_first_token_seconds)
+      caps: caps,
+      // output_tokens_per_second: what the Action writes now (Performance v3
+      // where measured). median_*: files published before that.
+      tps: aaNum(r.output_tokens_per_second) !== null ? aaNum(r.output_tokens_per_second) : aaNum(r.median_output_tokens_per_second),
+      ttft: aaNum(r.time_to_first_token_seconds) !== null ? aaNum(r.time_to_first_token_seconds) : aaNum(r.median_time_to_first_token_seconds)
     };
   }
+
+  // Artificial Analysis's Capability Indexes (0-100, like the headline index).
+  // The free endpoint carries these but not the individual benchmarks.
+  var AA_CAPS = {
+    artificial_analysis_engineering_index: "Engineering",
+    artificial_analysis_finance_and_accounting_index: "Finance & accounting",
+    artificial_analysis_economics_index: "Economics",
+    artificial_analysis_legal_index: "Legal",
+    artificial_analysis_healthcare_and_medical_index: "Healthcare & medical",
+    artificial_analysis_strategy_and_ops_index: "Strategy & operations"
+  };
 
   var AA_CREATOR_ALIAS = {
     "meta-llama": "meta", "mistralai": "mistral", "mistral-ai": "mistral", "x-ai": "xai",
@@ -4528,7 +4543,10 @@
     "bytedance-seed": "bytedance", "deepseek-ai": "deepseek", "google-deepmind": "google",
     "cohereforai": "cohere", "cohere-for-ai": "cohere", "allenai": "ai2", "stepfun-ai": "stepfun",
     "arcee-ai": "arcee", "meituan": "longcat", "meituan-longcat": "longcat", "nex-agi": "nex",
-    "lgai": "lg", "lgai-exaone": "lg", "lg-ai-research": "lg"
+    "lgai": "lg", "lgai-exaone": "lg", "lg-ai-research": "lg",
+    // Creator names as the free endpoint gives them (it has no creator slug)
+    // where the name doesn't reduce to OpenRouter's prefix on its own.
+    "spacexai": "xai", "spacex-ai": "xai", "allen-institute-for-ai": "ai2"
   };
 
   function canonCreator(s) {
@@ -4614,7 +4632,7 @@
       .sort(function (a, b) { return a - b; });
     if (scores.length) {
       var q = function (p) { return scores[Math.floor(p * (scores.length - 1))]; };
-      aaTiers = { p30: q(0.3), p70: q(0.7), p90: q(0.9), max: scores[scores.length - 1] };
+      aaTiers = { p30: q(0.3), p70: q(0.7), p90: q(0.9), max: scores[scores.length - 1], all: scores };
     }
     var idx = buildAAIndex(aaCache.models);
     allModels.forEach(function (m) {
@@ -4674,12 +4692,31 @@
     return scored;
   }
 
+  // Tiers are percentiles of the models Artificial Analysis has scored, so
+  // they are relative to that group: when it is small or mostly recent
+  // models (as after a new index version), "Light" means "behind this
+  // group", not "weak". The wording says so, and the card gives the rank.
   var AA_TIER_TEXT = {
-    frontier: ["Frontier", "top 10% of models Artificial Analysis measures", "Among the strongest measured. Suited to hard reasoning, long agentic tasks and serious coding."],
-    strong: ["Strong", "top 30% of measured models", "Solid on multi-step reasoning and coding. A safe default for most complex work."],
-    capable: ["Capable", "middle 40% of measured models", "Good for everyday chat, writing and straightforward tasks. Check its work on anything intricate."],
-    light: ["Light", "bottom 30% of measured models", "Fluent, but weak on multi-step reasoning, maths and agentic tool use. Fine for casual chat and drafting."]
+    frontier: ["Frontier", "top 10%", "Among the strongest scored. Suited to hard reasoning, long agentic tasks and serious coding."],
+    strong: ["Strong", "top 30%", "Close behind the leaders. A safe default for most complex work."],
+    capable: ["Capable", "middle 40%", "Mid-pack among scored models. Check its work on anything intricate."],
+    light: ["Light", "bottom 30%", "Behind most scored models. Compare a stronger pick for hard reasoning, maths or agentic work."]
   };
+
+  // "of the 96 models Artificial Analysis has scored (Intelligence Index v5)"
+  function aaGroupText() {
+    var n = aaTiers ? aaTiers.all.length : 0;
+    var ver = aaCache && aaCache.version ? " (Intelligence Index v" + aaCache.version + ")" : "";
+    return "of the " + n + " models Artificial Analysis has scored" + ver;
+  }
+
+  // 1 + how many scored models are strictly higher: ties share a rank.
+  function aaRank(v) {
+    if (v === null || !aaTiers) return null;
+    var higher = 0;
+    for (var i = aaTiers.all.length - 1; i >= 0 && aaTiers.all[i] > v; i--) higher++;
+    return higher + 1;
+  }
 
   function aaTier(v) {
     if (v === null || !aaTiers) return null;
@@ -4738,7 +4775,8 @@
         var models = json.data.map(normaliseAA).filter(Boolean);
         if (!models.length) throw new Error("the scores file has no usable models");
         var fetchedAt = typeof json.fetchedAt === "string" ? Date.parse(json.fetchedAt) : NaN;
-        aaCache = { fetchedAt: isFinite(fetchedAt) ? fetchedAt : null, models: models };
+        var version = aaNum(json.intelligenceIndexVersion);
+        aaCache = { fetchedAt: isFinite(fetchedAt) ? fetchedAt : null, models: models, version: version };
         aaError = "";
       }
     } catch (e) {
@@ -4798,10 +4836,12 @@
     browseProvider.value = pv;
     if (browseProvider.value !== pv) browseProvider.value = "";
     browseIntel.hidden = !fillIntelSelect(browseIntel, browseIntel.value, allModels);
+    // A sort is offered only when some model has the value: the free
+    // endpoint publishes no coding or maths index, for instance.
     var needsScores = { intel: 1, coding: 1, math: 1, speed: 1 };
     for (var i = 0; i < browseSort.options.length; i++) {
       var o = browseSort.options[i];
-      if (needsScores[o.value]) o.disabled = !aaMatched;
+      if (needsScores[o.value]) o.disabled = !allModels.some(function (m) { return typeof browseValue(m, o.value) === "number"; });
     }
     if (browseSort.selectedOptions[0] && browseSort.selectedOptions[0].disabled) browseSort.value = "name";
   }
@@ -4863,18 +4903,28 @@
     if (m.aa) {
       var t = AA_TIER_TEXT[aaTier(intelOf(m))];
       if (t) {
-        box.appendChild(el("div", "tier-line", t[0] + " · " + t[1]));
+        box.appendChild(el("div", "tier-line", t[0] + " · " + t[1] + " " + aaGroupText()));
         box.appendChild(el("div", "gloss", t[2]));
       }
       var grid = el("div", "stat-grid");
       var r = function (v) { return typeof v === "number" ? Math.round(v) : null; };
       addStat(grid, "Intelligence", r(m.aa.intel));
+      var rank = aaRank(intelOf(m));
+      addStat(grid, "Rank", rank ? "#" + rank + " of " + aaTiers.all.length : null);
       addStat(grid, "Reasoning mode", m.aaR ? r(m.aaR.intel) : null);
       addStat(grid, "Coding", r(m.aa.coding));
       addStat(grid, "Maths", r(m.aa.math));
       addStat(grid, "Median speed", typeof m.aa.tps === "number" ? Math.round(m.aa.tps) + " tok/s" : null);
       addStat(grid, "First token", typeof m.aa.ttft === "number" ? m.aa.ttft.toFixed(1) + "s" : null);
       box.appendChild(grid);
+      var caps = m.aa.caps || {};
+      Object.keys(AA_CAPS).forEach(function (k) {
+        if (typeof caps[k] !== "number") return;
+        var row = el("div", "bench");
+        row.appendChild(el("span", null, AA_CAPS[k]));
+        row.appendChild(el("span", null, String(Math.round(caps[k]))));
+        box.appendChild(row);
+      });
       var evals = m.aa.evals || {};
       Object.keys(evals).forEach(function (k) {
         var row = el("div", "bench");

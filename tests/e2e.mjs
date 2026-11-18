@@ -146,7 +146,9 @@ const fakeFetch = () => {
     ["mistral-ai", "mistral"], ["qwen", "alibaba-cloud"], ["moonshot-ai", "kimi"], ["z-ai", "zhipu"], ["zhipu-ai", "zai"],
     ["microsoft", "microsoft-azure"], ["liquid", "liquid-ai"], ["deepseek-ai", "deepseek"], ["google", "google-deepmind"],
     ["cohere", "cohereforai"], ["cohere", "cohere-for-ai"], ["meituan-longcat", "longcat"], ["lgai-exaone", "lg"],
-    ["lgai", "lg-ai-research"]
+    ["lgai", "lg-ai-research"],
+    // Creator names from the free endpoint, which gives no creator slug.
+    ["x-ai", "SpaceXAI"], ["x-ai", "SpaceX AI"], ["allenai", "Allen Institute for AI"]
   ];
   window.__imgRequests = [];
   window.__tinyPng = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==";
@@ -172,6 +174,22 @@ const fakeFetch = () => {
       if (mode === "empty") return new Response(JSON.stringify({ fetchedAt: new Date().toISOString(), data: [] }), { status: 200 });
       if (mode === "missing") return new Response(JSON.stringify({ fetchedAt: new Date().toISOString() }), { status: 200 });
       if (mode === "notarray") return new Response(JSON.stringify({ fetchedAt: new Date().toISOString(), data: { models: [] } }), { status: 200 });
+      if (mode === "free") {
+        // A file as the Action writes it from the free endpoint: creators
+        // without a slug, speed in output_tokens_per_second, Capability
+        // Indexes, no coding or maths index and no individual benchmarks.
+        const data = [
+          { id: "f-1", name: "Claude 4 Sonnet", slug: "claude-4-sonnet", release_date: "2025-05-22", model_creator: { id: "c-anth", name: "Anthropic" },
+            evaluations: { artificial_analysis_intelligence_index: 44.4, artificial_analysis_legal_index: 38.2, artificial_analysis_engineering_index: 41.6 },
+            output_tokens_per_second: 71.4, time_to_first_token_seconds: 2.13 },
+          { id: "f-2", name: "GPT-4o mini", slug: "gpt-4o-mini", release_date: "2024-07-18", model_creator: { id: "c-oai", name: "OpenAI" },
+            evaluations: { artificial_analysis_intelligence_index: 21.2 } },
+          { id: "f-3", name: "Impostor Sonnet", slug: "claude-4-sonnet", model_creator: { id: "c-x", name: "Someone Else" },
+            evaluations: { artificial_analysis_intelligence_index: 99 } }
+        ];
+        return new Response(JSON.stringify({ source: "Artificial Analysis", fetchedAt: new Date().toISOString(), intelligenceIndexVersion: 5, data }),
+          { status: 200, headers: { "Content-Type": "application/json" } });
+      }
       if (mode === "aliases") {
         const data = window.__aliasPairs.map(([, aa], i) => ({ id: "al" + i, name: "Alias Probe " + i, slug: "alias-probe-" + i,
           model_creator: { name: aa, slug: aa }, evaluations: { artificial_analysis_intelligence_index: 10 + i } }));
@@ -938,7 +956,7 @@ check("browse: cards start collapsed for screen readers", await page.$eval("#bro
 await page.click("#browse-list .mcard:nth-child(1) .mcard-main");
 check("browse: expanded card says so", await page.$eval("#browse-list .mcard:nth-child(1) .mcard-main", b => b.getAttribute("aria-expanded") === "true"));
 const brief = await page.$eval("#browse-list .mcard:nth-child(1) .mcard-detail", d => d.textContent);
-check("browse: briefing card", brief.includes("Strong · top 30%") && brief.includes("Reasoning mode") && brief.includes("GPQA Diamond") && brief.includes("68.3%") && brief.includes("55 tok/s") && brief.includes("Artificial Analysis entry: Claude 4 Sonnet, released 2025-05-22.") && brief.includes("Current model"), brief);
+check("browse: briefing card", brief.includes("Strong · top 30% of the 8 models Artificial Analysis has scored") && brief.includes("#3 of 8Rank") && brief.includes("Reasoning mode") && brief.includes("GPQA Diamond") && brief.includes("68.3%") && brief.includes("55 tok/s") && brief.includes("Artificial Analysis entry: Claude 4 Sonnet, released 2025-05-22.") && brief.includes("Current model"), brief);
 await page.click("#browse-list .mcard:nth-child(2) .mcard-main");
 await page.click("#browse-list .mcard:nth-child(2) .btn.primary");
 await page.waitForFunction(() => document.getElementById("browse-view").hidden);
@@ -1198,6 +1216,26 @@ check("aa: every alias in the app's table has a tested pair (" + aliasKeys.lengt
 check("aa: an unknown org never borrows another creator's score", !/AI/.test(aliasLabels["unknownorg/alias-probe-99"] || "AI"), aliasLabels["unknownorg/alias-probe-99"]);
 await page.click("#save-settings");
 await page.evaluate(() => { localStorage.removeItem("__aaMode"); localStorage.removeItem("__orMode"); });
+
+// A scores file in the shape the free endpoint gives.
+await page.evaluate(() => { localStorage.setItem("__aaMode", "free"); localStorage.removeItem("orc_filters"); });
+await page.reload({ waitUntil: "load" });
+await page.click("#open-settings");
+await page.waitForFunction(() => !document.getElementById("filter-intel").hidden);
+check("aa free: creators matched by name, decoy ignored", (await page.textContent("#aa-status")).endsWith("Matched 2 of 6 models."), await page.textContent("#aa-status"));
+await page.click("#browse-open");
+await page.waitForSelector("#browse-view:not([hidden]) .mcard");
+const freeSorts = await page.$$eval("#browse-sort option", os => Object.fromEntries(os.map(o => [o.value, o.disabled])));
+check("aa free: sorts without data are off", freeSorts.coding && freeSorts.math && !freeSorts.intel && !freeSorts.speed && !freeSorts.name, JSON.stringify(freeSorts));
+await page.click("#browse-list .mcard:nth-child(1) .mcard-main");
+const freeBrief = await page.$eval("#browse-list .mcard:nth-child(1) .mcard-detail", d => d.textContent);
+check("aa free: speed, first token and capability indexes shown",
+  freeBrief.includes("71 tok/s") && freeBrief.includes("2.1s") && freeBrief.includes("Engineering42") && freeBrief.includes("Legal38") &&
+  !freeBrief.includes("Coding") && freeBrief.includes("scored (Intelligence Index v5)") && freeBrief.includes("#2 of 3Rank") && freeBrief.includes("Artificial Analysis entry: Claude 4 Sonnet"), freeBrief);
+await page.click("#browse-close");
+await page.waitForFunction(() => document.getElementById("browse-view").hidden);
+await page.click("#save-settings");
+await page.evaluate(() => localStorage.removeItem("__aaMode"));
 
 
 // ---------- Export reachability and per-chat export ----------

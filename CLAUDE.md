@@ -26,9 +26,17 @@ phone, so every change ships as a PR that is merged to `main`, which deploys.
 - Intelligence scores come from Artificial Analysis, whose API refuses
   browser requests. `.github/workflows/aa-scores.yml` runs
   `.github/scripts/fetch-aa-scores.mjs` daily with the repository secret
-  `AA_API_KEY`, refetches when the published data is over 7 days old, and
+  `AA_API_KEY`, refetches when the published data is over 20 hours old, and
   commits `data/aa-models.json`, which the app reads from its own site.
-  Don't reintroduce a browser-side key.
+  Don't reintroduce a browser-side key. The source is the free
+  `/api/v2/language/models/free` (OpenAPI spec at `/api/v2/openapi`): it is
+  paginated (`pagination.has_more`, `?page=`), and reading only page 1 once
+  silently dropped most models. Its creators have an id and name but no
+  slug, so the app matches creators by name (aliases in
+  `AA_CREATOR_ALIAS`). Speed comes from `performance_v3` (means); the older
+  `performance` medians go null on 10 December 2026. The Action writes
+  speed as `output_tokens_per_second` / `time_to_first_token_seconds`; the
+  app still reads the older `median_*` names.
 
 - Image models use OpenRouter's image API (`POST /images`, catalogue at
   `/images/models`), not chat. Generated images are stored as Blobs in
