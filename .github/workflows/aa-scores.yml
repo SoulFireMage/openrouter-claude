@@ -3,8 +3,8 @@
 # Needs one repository secret, AA_API_KEY (Settings > Secrets and variables >
 # Actions). Without it every run skips with a warning and changes nothing.
 #
-# Runs daily but only fetches when the published scores are more than 7 days
-# old, so a newly added key takes effect within a day. "Run workflow" on the
+# Runs daily and fetches when the published scores are more than 20 hours old
+# (all pages of the free endpoint: a few of the 100 requests a day it allows). "Run workflow" on the
 # Actions tab forces an immediate refresh.
 name: Refresh intelligence scores
 

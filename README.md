@@ -174,10 +174,18 @@ multi-step reasoning or agentic work. To help tell them apart, the app shows
   Artificial Analysis API key. Add it under **Settings → Secrets and
   variables → Actions → New repository secret**. Without it, runs skip with a
   warning and change nothing.
-- It runs daily and refetches only when the published scores are more than
-  7 days old, so a newly added key takes effect within a day. **Run workflow**
-  on the Actions tab forces an immediate refresh. A failed or suspiciously
-  small response never replaces good data.
+- It runs daily and refetches when the published scores are more than 20
+  hours old. It reads every page of the free `/api/v2/language/models/free`
+  endpoint (200 models a page; a few of the 100 requests a day the free tier
+  allows). **Run workflow** on the Actions tab forces an immediate refresh. A
+  failed, partial or suspiciously small response never replaces good data.
+- The free endpoint carries the Intelligence Index, the six Capability
+  Indexes (engineering, finance, economics, legal, healthcare, strategy),
+  speed and time to first token. It has no coding or maths index and no
+  individual benchmarks, so those sorts are switched off while they have no
+  data. Since Intelligence Index v5 (November 2026) Artificial Analysis has
+  scored only the models it has re-run, so fewer models carry a score than
+  before.
 - Artificial Analysis ids share nothing with OpenRouter's, so models are
   matched by creator plus the words in the model name, in any order. Matching
   is deliberately strict because a wrong score is worse than none. A near
