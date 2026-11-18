@@ -956,7 +956,7 @@ check("browse: cards start collapsed for screen readers", await page.$eval("#bro
 await page.click("#browse-list .mcard:nth-child(1) .mcard-main");
 check("browse: expanded card says so", await page.$eval("#browse-list .mcard:nth-child(1) .mcard-main", b => b.getAttribute("aria-expanded") === "true"));
 const brief = await page.$eval("#browse-list .mcard:nth-child(1) .mcard-detail", d => d.textContent);
-check("browse: briefing card", brief.includes("Strong · top 30%") && brief.includes("Reasoning mode") && brief.includes("GPQA Diamond") && brief.includes("68.3%") && brief.includes("55 tok/s") && brief.includes("Artificial Analysis entry: Claude 4 Sonnet, released 2025-05-22.") && brief.includes("Current model"), brief);
+check("browse: briefing card", brief.includes("Strong · top 30% of the 8 models Artificial Analysis has scored") && brief.includes("#3 of 8Rank") && brief.includes("Reasoning mode") && brief.includes("GPQA Diamond") && brief.includes("68.3%") && brief.includes("55 tok/s") && brief.includes("Artificial Analysis entry: Claude 4 Sonnet, released 2025-05-22.") && brief.includes("Current model"), brief);
 await page.click("#browse-list .mcard:nth-child(2) .mcard-main");
 await page.click("#browse-list .mcard:nth-child(2) .btn.primary");
 await page.waitForFunction(() => document.getElementById("browse-view").hidden);
@@ -1231,7 +1231,7 @@ await page.click("#browse-list .mcard:nth-child(1) .mcard-main");
 const freeBrief = await page.$eval("#browse-list .mcard:nth-child(1) .mcard-detail", d => d.textContent);
 check("aa free: speed, first token and capability indexes shown",
   freeBrief.includes("71 tok/s") && freeBrief.includes("2.1s") && freeBrief.includes("Engineering42") && freeBrief.includes("Legal38") &&
-  !freeBrief.includes("Coding") && freeBrief.includes("Artificial Analysis entry: Claude 4 Sonnet"), freeBrief);
+  !freeBrief.includes("Coding") && freeBrief.includes("scored (Intelligence Index v5)") && freeBrief.includes("#2 of 3Rank") && freeBrief.includes("Artificial Analysis entry: Claude 4 Sonnet"), freeBrief);
 await page.click("#browse-close");
 await page.waitForFunction(() => document.getElementById("browse-view").hidden);
 await page.click("#save-settings");

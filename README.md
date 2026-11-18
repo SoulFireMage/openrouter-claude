@@ -199,8 +199,10 @@ multi-step reasoning or agentic work. To help tell them apart, the app shows
 - The picker's intelligence filter uses 10-point bands built from the data.
   The model browser (the bar-chart button in the header) sorts and filters by
   intelligence, coding, maths, price, speed, context or age. Its tiers
-  (Light, Capable, Strong, Frontier) are percentiles of every model Artificial
-  Analysis measures, so they stay meaningful if the index is rescaled.
+  (Light, Capable, Strong, Frontier) are percentiles of the models Artificial
+  Analysis has scored, so they survive a rescaled index but are relative to
+  that group. Each card therefore also gives the rank ("#12 of 96") and the
+  group's size and index version, so a small or recent-heavy group shows.
 - Data is attributed to Artificial Analysis in the model browser, as their
   free API requires.
 

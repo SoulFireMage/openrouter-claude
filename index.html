@@ -4632,7 +4632,7 @@
       .sort(function (a, b) { return a - b; });
     if (scores.length) {
       var q = function (p) { return scores[Math.floor(p * (scores.length - 1))]; };
-      aaTiers = { p30: q(0.3), p70: q(0.7), p90: q(0.9), max: scores[scores.length - 1] };
+      aaTiers = { p30: q(0.3), p70: q(0.7), p90: q(0.9), max: scores[scores.length - 1], all: scores };
     }
     var idx = buildAAIndex(aaCache.models);
     allModels.forEach(function (m) {
@@ -4692,12 +4692,31 @@
     return scored;
   }
 
+  // Tiers are percentiles of the models Artificial Analysis has scored, so
+  // they are relative to that group: when it is small or mostly recent
+  // models (as after a new index version), "Light" means "behind this
+  // group", not "weak". The wording says so, and the card gives the rank.
   var AA_TIER_TEXT = {
-    frontier: ["Frontier", "top 10% of models Artificial Analysis measures", "Among the strongest measured. Suited to hard reasoning, long agentic tasks and serious coding."],
-    strong: ["Strong", "top 30% of measured models", "Solid on multi-step reasoning and coding. A safe default for most complex work."],
-    capable: ["Capable", "middle 40% of measured models", "Good for everyday chat, writing and straightforward tasks. Check its work on anything intricate."],
-    light: ["Light", "bottom 30% of measured models", "Fluent, but weak on multi-step reasoning, maths and agentic tool use. Fine for casual chat and drafting."]
+    frontier: ["Frontier", "top 10%", "Among the strongest scored. Suited to hard reasoning, long agentic tasks and serious coding."],
+    strong: ["Strong", "top 30%", "Close behind the leaders. A safe default for most complex work."],
+    capable: ["Capable", "middle 40%", "Mid-pack among scored models. Check its work on anything intricate."],
+    light: ["Light", "bottom 30%", "Behind most scored models. Compare a stronger pick for hard reasoning, maths or agentic work."]
   };
+
+  // "of the 96 models Artificial Analysis has scored (Intelligence Index v5)"
+  function aaGroupText() {
+    var n = aaTiers ? aaTiers.all.length : 0;
+    var ver = aaCache && aaCache.version ? " (Intelligence Index v" + aaCache.version + ")" : "";
+    return "of the " + n + " models Artificial Analysis has scored" + ver;
+  }
+
+  // 1 + how many scored models are strictly higher: ties share a rank.
+  function aaRank(v) {
+    if (v === null || !aaTiers) return null;
+    var higher = 0;
+    for (var i = aaTiers.all.length - 1; i >= 0 && aaTiers.all[i] > v; i--) higher++;
+    return higher + 1;
+  }
 
   function aaTier(v) {
     if (v === null || !aaTiers) return null;
@@ -4756,7 +4775,8 @@
         var models = json.data.map(normaliseAA).filter(Boolean);
         if (!models.length) throw new Error("the scores file has no usable models");
         var fetchedAt = typeof json.fetchedAt === "string" ? Date.parse(json.fetchedAt) : NaN;
-        aaCache = { fetchedAt: isFinite(fetchedAt) ? fetchedAt : null, models: models };
+        var version = aaNum(json.intelligenceIndexVersion);
+        aaCache = { fetchedAt: isFinite(fetchedAt) ? fetchedAt : null, models: models, version: version };
         aaError = "";
       }
     } catch (e) {
@@ -4883,12 +4903,14 @@
     if (m.aa) {
       var t = AA_TIER_TEXT[aaTier(intelOf(m))];
       if (t) {
-        box.appendChild(el("div", "tier-line", t[0] + " · " + t[1]));
+        box.appendChild(el("div", "tier-line", t[0] + " · " + t[1] + " " + aaGroupText()));
         box.appendChild(el("div", "gloss", t[2]));
       }
       var grid = el("div", "stat-grid");
       var r = function (v) { return typeof v === "number" ? Math.round(v) : null; };
       addStat(grid, "Intelligence", r(m.aa.intel));
+      var rank = aaRank(intelOf(m));
+      addStat(grid, "Rank", rank ? "#" + rank + " of " + aaTiers.all.length : null);
       addStat(grid, "Reasoning mode", m.aaR ? r(m.aaR.intel) : null);
       addStat(grid, "Coding", r(m.aa.coding));
       addStat(grid, "Maths", r(m.aa.math));
