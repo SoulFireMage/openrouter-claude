@@ -224,6 +224,9 @@ response's field names (never the key) to make shape changes easy to spot.
 
 - Develop on the session's feature branch, restarted from `origin/main` for
   each new piece of work, then open a PR and merge it (merge commit).
+- Open PRs as ready for review, not draft: Copilot skips drafts. Merging
+  to `main` is the default; for a code change, give Copilot's review a
+  chance to arrive first.
 - Copilot reviews PRs automatically. Treat its findings as bug reports:
   verify, fix what is real, and reply on the thread when declining one.
 - Keep README.md's feature list current.
